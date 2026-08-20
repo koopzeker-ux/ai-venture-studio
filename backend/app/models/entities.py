@@ -27,7 +27,7 @@ class Signal(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source: Mapped[str] = mapped_column(String(100), index=True)
-    source_url: Mapped[str | None] = mapped_column(Text)
+    source_url: Mapped[str | None] = mapped_column(Text, unique=True)
     title: Mapped[str | None] = mapped_column(Text)
     content: Mapped[str] = mapped_column(Text)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
