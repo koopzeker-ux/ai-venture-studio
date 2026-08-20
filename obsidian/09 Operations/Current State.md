@@ -91,32 +91,52 @@ respected, resolved the one merge conflict, merged after the full test
 suite passed, and then verified the live end-to-end chain before
 marking M1 complete.
 
-## Milestone M2.1 — PLANNED, not started (2026-08-20)
+## Milestone M2.1 — PLANNED, not started (revised 2026-08-20)
 Goal: first real vertical slice of Market Intelligence — collect real
-Reddit signals, normalize/dedupe them, and turn matching ones into
-opportunity candidates (status `discovered`) with attached evidence,
-reusing the existing M1 scoring + Telegram-alert pipeline unchanged.
+signals from source-agnostic connectors, normalize/dedupe them, and
+turn matching ones into opportunity candidates (status `discovered`)
+with attached evidence, reusing the existing M1 scoring + Telegram-
+alert pipeline unchanged.
 
-Scope decision: only Reddit for M2.1 (official OAuth API,
-client_credentials, read-only, official rate limits respected — no
-scraping/anti-bot bypass). No LLM-based auto-scoring or auto-drafted
-thesis text yet — no model provider is approved/budgeted for that, so
-candidates stay `score = NULL` until a human scores them via the
-already-built `/opportunities/{id}/score` endpoint. YouTube/web-
-search/reviews/competitor-tracking sources and real semantic
-clustering are explicitly deferred to later M2.x slices.
+**Revised scope (superseding the original Reddit-only plan below):**
+the Reddit-only design was corrected after review of Reddit's Data API
+Terms — commercial use may require a separate agreement, which AI
+Venture Studio's opportunity-discovery purpose likely triggers. Reddit
+is now an optional future connector, gated behind explicit confirmed
+permission for our use case; it is NOT part of M2.1.
+
+M2.1 sources instead: **Hacker News** (official Firebase API / Algolia
+HN Search API — free, no auth, no commercial-use restriction found)
+and a **generic RSS/Atom connector** (seeded with Product Hunt's
+official public feed). Both require zero new secrets. Google Trends
+(no public self-serve API, only unofficial scraping — excluded) and
+YouTube Data API (ToS ambiguity around indefinite storage of API data
+for a research database — deferred pending explicit compliance review)
+were researched and excluded for now; see Decision Timeline for detail.
+
+The core pipeline (normalize -> dedupe -> candidate detection ->
+Opportunity/Evidence) is now explicitly source-agnostic: it only
+consumes a generic raw-signal contract and must contain no
+connector-specific logic, so additional sources (RSS feeds, and later
+Reddit/YouTube once cleared) can be added without touching it. No
+LLM-based auto-scoring yet — candidates stay `score = NULL` until a
+human scores them via the already-built `/opportunities/{id}/score`
+endpoint.
 
 Work split (parallel, disjoint file ownership, same worktree pattern
 as M1 — BUILDER/INTELLIGENCE/REVIEWER push to their `agent/*` branches,
 no self-merge to `main`):
-- BUILDER: Reddit OAuth client + CLI collector entrypoint + config.
-- INTELLIGENCE: normalize + dedupe (DB-level unique constraint) +
-  pain-point/purchase-intent heuristic filter + candidate/evidence
-  creation.
-- REVIEWER: end-to-end pipeline tests (mocked HTTP, no real network
-  calls in the test suite) + resilience tests for the Reddit client +
-  regression check that M1's scoring/Telegram path still works on a
-  Reddit-sourced candidate.
+- BUILDER: Hacker News client + generic RSS/Atom client + generic
+  multi-connector CLI entrypoint + config (no secrets needed).
+- INTELLIGENCE: source-agnostic normalize + dedupe (DB-level unique
+  constraint) + generic candidate-detection (keyword trigger OR
+  engagement-threshold trigger) + candidate/evidence creation.
+- REVIEWER: end-to-end pipeline tests mixing fixtures from both
+  connectors through the same pipeline call (proves genericity) +
+  resilience tests for both clients (mocked, no real network calls) +
+  regression check that M1's scoring/Telegram path still works
+  unchanged on a resulting candidate.
 
-Full plan (architecture, acceptance criteria, exact agent prompts)
-given to the project owner for review; nothing implemented yet.
+Full revised plan (architecture, source research, acceptance criteria,
+exact agent prompts) given to the project owner for review; nothing
+implemented yet.

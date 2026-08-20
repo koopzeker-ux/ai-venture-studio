@@ -59,3 +59,25 @@
   same worktree pattern as M1. Presented to project owner as a plan
   (architecture, acceptance criteria, exact agent prompts) for review
   before any implementation starts.
+- 2026-08-20: SUPERSEDES the previous entry — M2.1's Reddit-only scope
+  was withdrawn before any implementation started. Why: the project
+  owner checked Reddit's actual Data API Terms and found that
+  commercial use may require a separate agreement/explicit permission;
+  AI Venture Studio's opportunity-discovery purpose is commercial, so
+  "Reddit = free official source" could not be assumed as an
+  architecture decision. Response: redesigned M2.1 as a source-agnostic
+  pipeline (no connector-specific logic allowed in normalize/dedupe/
+  candidate-detection), Reddit demoted to an optional future connector
+  gated behind explicit confirmed permission. Researched alternatives
+  (Google Trends, YouTube Data API, RSS/Atom, Hacker News API, Product
+  Hunt API) before choosing again. Selected for M2.1: Hacker News
+  (official Firebase/Algolia API, free, no auth, no commercial-use
+  restriction found) and a generic RSS/Atom connector seeded with
+  Product Hunt's official public feed — both need zero new secrets.
+  Excluded: Google Trends (no public self-serve API as of 2026, only
+  unofficial scraping — would violate the no-scraping rule), YouTube
+  Data API (ToS is ambiguous/restrictive on indefinite storage of API
+  data for a research database — needs a dedicated compliance review
+  before use, not assumed safe). Decided by LEAD after explicit
+  correction from the project owner; revised plan presented for review
+  before implementation.
