@@ -123,3 +123,27 @@
   Telegram confirmed intact with a real, live alert send. No Reddit/
   YouTube/Google Trends, no LLM, no threshold tuning without approval.
   Approved by project owner.
+- 2026-08-20: Milestone M3.1 marked COMPLETE — first slice of the
+  planned M3 "Opportunity Research & Prioritization Engine". Replaces
+  M2.2's first-come-first-served volume cap with deterministic
+  pre-ranking (signal-diversity + purchase-intent/alternative-seeking/
+  pain weighting + a log-scaled, capped engagement bonus), proven
+  input-order-independent by both INTELLIGENCE and REVIEWER
+  (REVIEWER's version deliberately placed the winning candidate last
+  in the input to specifically probe for position bias). Also adds
+  AgentRun logging per collector run and a read-only
+  GET /api/opportunities/{id} detail endpoint (evidence visibility,
+  needed ahead of M3.2). Why complete: full suite green (120/120), and
+  live verification against real Docker/PostgreSQL confirmed dedupe,
+  AgentRun, and the detail endpoint all work correctly — though the
+  live batch that day happened to contain zero gate-passing candidates
+  (explained: fresh low-engagement HN posts and duplicate high-
+  engagement classics from the same-day M2.2 run), so the
+  "commercial-evidence-beats-engagement" property was proven live only
+  via the automated tests' real engagement values (up to 6015), not
+  from a populated live cap-boundary table that day — recorded
+  honestly, no threshold/weight changed to force a different outcome.
+  M3.2 (Researcher) and M3.3 (Critic + automatic Evidence Confidence +
+  Telegram gate) remain fully designed in the M3 plan but NOT started —
+  both require a separate, explicit LLM-provider/budget approval before
+  any implementation. Approved by project owner.

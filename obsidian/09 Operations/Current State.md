@@ -1,6 +1,77 @@
 # Current State
 
-## Milestone M3.1 — IMPLEMENTATION INTEGRATED, INDEPENDENT REVIEWER VALIDATION PENDING (2026-08-20)
+## Milestone M3.1 — COMPLETE (2026-08-20)
+Deterministic pre-ranking replaces the first-come-first-served volume
+cap; REVIEWER validated independently; verified live against the real
+Docker/PostgreSQL stack. First slice of the "Opportunity Research &
+Prioritization Engine" milestone — M3.2 (Researcher) and M3.3 (Critic
++ automatic Evidence Confidence + Telegram gate) remain fully designed
+but **not started**, pending a separate, explicit LLM-provider
+approval (see the M3 plan).
+
+**REVIEWER integrated** (commit `6826f5b`, merge on top of M3.1):
+tests only, no production code. Independent proof: a modest-engagement
+(60) purchase-intent+traction candidate beats pure-traction candidates
+up to engagement=6015 even when placed **last** in the input
+(deliberately probing for position bias, not just random shuffling);
+multiple input orderings yield an identical top-N; deterministic
+tie-break on `source_url`; Pre-Rank Score never touches
+`Opportunity.score` or `evidence_confidence`; independent contract
+tests for `GET /api/opportunities/{id}` and for `AgentRun` logging
+across success/empty/failure paths. Full suite after this merge:
+**120 passed, 0 failed**.
+
+**Live verification against the real Docker/PostgreSQL stack
+(2026-08-20):**
+- `api` image rebuilt with current `main`; `docker compose ps` both
+  services up, `db` healthy; `/api/health` OK; PostgreSQL reachable.
+- Ran the real collectors: **110 raw signals** (60 HN, 50 RSS), of
+  which **33 genuinely new** (77 duplicates — heavy overlap with the
+  M2.2 run from earlier the same day). **Zero gate-passing
+  candidates** this run.
+- Investigated rather than dismissed: the 33 new signals were all
+  fresh HN posts (engagement 1-8, far under the traction threshold of
+  50) plus a handful of launch-only RSS/Show-HN items with no strong
+  trigger language; the previously-found high-engagement HN classics
+  (e.g. "Steve Jobs has passed away", 4338 pts) are now duplicates and
+  correctly never re-enter candidate detection. This is a real,
+  explained data outcome, not a defect — the ranking/gate logic itself
+  stays proven correct by 120 automated tests (including REVIEWER's
+  dedicated real-engagement-value tests up to 6015). No ranking
+  weights were changed to force a different live outcome.
+- Re-ran the collector immediately after: 5 new signals (HN's live
+  feed moved slightly in the few minutes between runs — expected),
+  105 duplicates, **still exactly 22 Opportunities** (0 new, 0
+  duplicated) — dedupe proven live again.
+- `AgentRun`: exactly one row per run, both `success=true`, with
+  `output_summary` matching the printed CLI counts exactly
+  (`signals_new=33`/`signals_new=5`, `candidates_created=0` both
+  times, etc.).
+- `GET /api/opportunities/{id}`: verified live for a known id (full
+  Opportunity + Evidence returned, matching the scoring done during
+  M2.2's live verification — `score: 60.5`, `evidence_confidence: 80`
+  unchanged, confirming M1's scoring data survived untouched) and for
+  an unknown id (404). Read-only — no side effects.
+- M1/M2 regression: confirmed via the full test suite plus the live
+  detail-endpoint response showing prior scoring data intact; no new
+  Telegram send was needed to prove this (already proven live during
+  M2.2, and unchanged code confirmed by tests, per the project owner's
+  instruction).
+
+**Honest caveat, not glossed over:** because this run had zero
+gate-passing candidates, there was no live cap-boundary data to show a
+populated "who ranked where" table. The ranking/cap mechanism did run
+(unconditionally, on every call), correctly computing an empty ranked
+pool and reporting `candidates_skipped_cap=0` — but real live proof of
+"commercial evidence beats pure engagement" specifically comes from
+REVIEWER's and INTELLIGENCE's automated tests (using real engagement
+values up to 6015), not from today's particular live batch. No
+threshold/weight was changed in response.
+
+No LLM, no new provider, no new dependency, no schema migration, no
+Reddit/YouTube/Google Trends. M3.2/M3.3 not started.
+
+## Milestone M3.1 — integration history (superseded by COMPLETE above)
 Not complete yet. Goal (M3.1 only — first slice of the "Opportunity
 Research & Prioritization Engine" milestone): replace the M2.2 volume
 cap's first-come-first-served ordering with deterministic,
