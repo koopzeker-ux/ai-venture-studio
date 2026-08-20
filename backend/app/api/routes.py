@@ -56,6 +56,40 @@ def list_opportunities(db: Session = Depends(get_db)):
     ]
 
 
+@router.get("/opportunities/{opportunity_id}")
+def get_opportunity(opportunity_id: int, db: Session = Depends(get_db)):
+    item = db.get(Opportunity, opportunity_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="opportunity not found")
+
+    return {
+        "id": item.id,
+        "slug": item.slug,
+        "title": item.title,
+        "thesis": item.thesis,
+        "business_model": item.business_model,
+        "status": item.status,
+        "score": item.score,
+        "evidence_confidence": item.evidence_confidence,
+        "score_breakdown": item.score_breakdown,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+        "evidence": [
+            {
+                "id": e.id,
+                "claim": e.claim,
+                "evidence_type": e.evidence_type,
+                "source": e.source,
+                "source_url": e.source_url,
+                "confidence": e.confidence,
+                "independently_confirmed": e.independently_confirmed,
+                "created_at": e.created_at,
+            }
+            for e in item.evidence
+        ],
+    }
+
+
 @router.post("/opportunities/{opportunity_id}/score")
 async def score_opportunity(opportunity_id: int, payload: ScoreRequest, db: Session = Depends(get_db)):
     item = db.get(Opportunity, opportunity_id)
