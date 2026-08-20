@@ -11,6 +11,7 @@ gate lives in pipeline.py, using the STRONG_EVIDENCE_TYPES classification
 below. product_launch_signal is deliberately excluded from that set: a
 launch is context, not evidence of demand.
 """
+import math
 import re
 
 DEFAULT_ENGAGEMENT_THRESHOLD = 50
@@ -125,3 +126,37 @@ def detect_candidates(normalized_signal: dict, engagement_threshold: int = DEFAU
         })
 
     return candidates
+
+
+def compute_pre_rank_score(candidates: list[dict], engagement_score: int | None) -> float:
+    """Deterministic commercial pre-ranking of a gate-passing candidate.
+
+    Answers only "should we look into this candidate first?" — this is NOT
+    Opportunity Score and NOT Evidence Confidence (CLAUDE.md §12: those are
+    separate axes, set only during scoring, never here).
+
+    score = 2.0 * (distinct evidence_types present)
+        + 1.5 if purchase_intent_signal present
+        + 1.0 if alternative_seeking_signal present
+        + 1.0 if pain_point_signal present
+        + 0.5 if product_launch_signal AND traction_signal both present
+        + min(log10(engagement_score + 1), 4.0) * 0.5
+              if traction_signal present and engagement_score is valid (>= 0)
+    Rounded to 3 decimals.
+    """
+    evidence_types = {candidate["evidence_type"] for candidate in candidates}
+    score = 2.0 * len(evidence_types)
+
+    if EVIDENCE_TYPE_PURCHASE_INTENT in evidence_types:
+        score += 1.5
+    if EVIDENCE_TYPE_ALTERNATIVE_SEEKING in evidence_types:
+        score += 1.0
+    if EVIDENCE_TYPE_PAIN_POINT in evidence_types:
+        score += 1.0
+    if EVIDENCE_TYPE_PRODUCT_LAUNCH in evidence_types and EVIDENCE_TYPE_TRACTION in evidence_types:
+        score += 0.5
+
+    if EVIDENCE_TYPE_TRACTION in evidence_types and engagement_score is not None and engagement_score >= 0:
+        score += min(math.log10(engagement_score + 1), 4.0) * 0.5
+
+    return round(score, 3)

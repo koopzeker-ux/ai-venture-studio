@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 from app.services.candidate_filter import (
@@ -7,6 +9,7 @@ from app.services.candidate_filter import (
     EVIDENCE_TYPE_PURCHASE_INTENT,
     EVIDENCE_TYPE_TRACTION,
     STRONG_EVIDENCE_TYPES,
+    compute_pre_rank_score,
     detect_candidates,
 )
 
@@ -136,3 +139,80 @@ def test_no_match_returns_empty_list():
 def test_missing_engagement_score_does_not_trigger():
     candidates = detect_candidates(_signal(content="normal content", engagement_score=None))
     assert candidates == []
+
+
+def _candidates(*evidence_types):
+    return [{"evidence_type": t, "trigger_detail": "x"} for t in evidence_types]
+
+
+def test_pre_rank_base_score_is_two_times_evidence_type_count():
+    assert compute_pre_rank_score(_candidates(EVIDENCE_TYPE_PAIN_POINT), None) == round(2.0 * 1 + 1.0, 3)
+    assert compute_pre_rank_score(
+        _candidates(EVIDENCE_TYPE_PAIN_POINT, EVIDENCE_TYPE_ALTERNATIVE_SEEKING), None
+    ) == round(2.0 * 2 + 1.0 + 1.0, 3)
+
+
+def test_pre_rank_purchase_intent_bonus():
+    assert compute_pre_rank_score(_candidates(EVIDENCE_TYPE_PURCHASE_INTENT), None) == round(2.0 + 1.5, 3)
+
+
+def test_pre_rank_alternative_seeking_bonus():
+    assert compute_pre_rank_score(_candidates(EVIDENCE_TYPE_ALTERNATIVE_SEEKING), None) == round(2.0 + 1.0, 3)
+
+
+def test_pre_rank_pain_point_bonus():
+    assert compute_pre_rank_score(_candidates(EVIDENCE_TYPE_PAIN_POINT), None) == round(2.0 + 1.0, 3)
+
+
+def test_pre_rank_launch_plus_traction_bonus_requires_both():
+    launch_and_traction = compute_pre_rank_score(
+        _candidates(EVIDENCE_TYPE_PRODUCT_LAUNCH, EVIDENCE_TYPE_TRACTION), 0
+    )
+    traction_only = compute_pre_rank_score(_candidates(EVIDENCE_TYPE_TRACTION), 0)
+    launch_only = compute_pre_rank_score(_candidates(EVIDENCE_TYPE_PRODUCT_LAUNCH), None)
+
+    # base(2 types)=4.0 + launch+traction bonus 0.5 + engagement(0)=log10(1)=0 -> 4.5
+    assert launch_and_traction == 4.5
+    # base(1 type)=2.0 + engagement(0)=0 -> 2.0, no launch+traction bonus without launch
+    assert traction_only == 2.0
+    # base(1 type)=2.0, no traction present so no bonus
+    assert launch_only == 2.0
+
+
+def test_pre_rank_traction_engagement_term_uses_log10_capped_at_four():
+    # engagement=99 -> log10(100)=2.0 exactly -> +1.0
+    assert compute_pre_rank_score(_candidates(EVIDENCE_TYPE_TRACTION), 99) == round(2.0 + 1.0, 3)
+    # engagement=999 -> log10(1000)=3.0 exactly -> +1.5
+    assert compute_pre_rank_score(_candidates(EVIDENCE_TYPE_TRACTION), 999) == round(2.0 + 1.5, 3)
+    # extremely high engagement is capped at log10 component == 4.0 -> +2.0 max
+    huge = compute_pre_rank_score(_candidates(EVIDENCE_TYPE_TRACTION), 10_000_000)
+    assert huge == 4.0
+
+
+def test_pre_rank_engagement_term_only_applies_with_traction_present():
+    # purchase_intent alone with an engagement_score passed in must not pick
+    # up the log10 bonus meant for traction_signal.
+    assert compute_pre_rank_score(_candidates(EVIDENCE_TYPE_PURCHASE_INTENT), 999) == round(2.0 + 1.5, 3)
+
+
+def test_pre_rank_rounds_to_three_decimals():
+    engagement = 500
+    expected = round(2.0 + min(math.log10(engagement + 1), 4.0) * 0.5, 3)
+    result = compute_pre_rank_score(_candidates(EVIDENCE_TYPE_TRACTION), engagement)
+    assert result == expected
+    assert result == round(result, 3)
+
+
+def test_pre_rank_invalid_engagement_score_is_ignored_safely():
+    # No engagement_score at all — traction bonus doesn't error, just skips.
+    assert compute_pre_rank_score(_candidates(EVIDENCE_TYPE_TRACTION), None) == 2.0
+    # Negative engagement (shouldn't occur post-normalize, but must not crash).
+    assert compute_pre_rank_score(_candidates(EVIDENCE_TYPE_TRACTION), -5) == 2.0
+
+
+def test_pre_rank_full_combo_purchase_intent_plus_traction_beats_pure_traction_max():
+    combo = compute_pre_rank_score(
+        _candidates(EVIDENCE_TYPE_PURCHASE_INTENT, EVIDENCE_TYPE_TRACTION), 60
+    )
+    pure_traction_at_cap = compute_pre_rank_score(_candidates(EVIDENCE_TYPE_TRACTION), 10_000_000)
+    assert combo > pure_traction_at_cap

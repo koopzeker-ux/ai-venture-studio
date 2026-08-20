@@ -14,6 +14,7 @@ from app.models.entities import Evidence, Opportunity, Signal
 from app.services.candidate_filter import (
     DEFAULT_ENGAGEMENT_THRESHOLD,
     STRONG_EVIDENCE_TYPES,
+    compute_pre_rank_score,
     detect_candidates,
 )
 from app.services.normalize import normalize_raw_signal
@@ -90,8 +91,11 @@ def process_raw_signals(
     signals_seen = 0
     signals_new = 0
     signals_duplicate = 0
-    candidates_created = 0
-    candidates_skipped_cap = 0
+
+    # Gate-passing candidates are collected first and only turned into
+    # Opportunities after the whole batch is ranked — so input order can
+    # never decide which candidates make the cap (see compute_pre_rank_score).
+    ranked_pool: list[dict] = []
 
     for raw in raw_signals:
         normalized = normalize_raw_signal(raw)
@@ -124,11 +128,29 @@ def process_raw_signals(
             # Signal (incl. metadata_json["is_launch"]) stays saved above.
             continue
 
+        engagement_score = normalized["metadata"].get("engagement_score")
+        pre_rank_score = compute_pre_rank_score(candidates, engagement_score)
+        ranked_pool.append({
+            "normalized": normalized,
+            "candidates": candidates,
+            "pre_rank_score": pre_rank_score,
+            "source_url": normalized["source_url"] or "",
+        })
+
+    # Deterministic ordering: highest pre-rank first, source_url as a stable
+    # tie-breaker. This is commercial triage priority only, never Opportunity
+    # Score / Evidence Confidence.
+    ranked_pool.sort(key=lambda entry: (-entry["pre_rank_score"], entry["source_url"]))
+
+    candidates_created = 0
+    candidates_skipped_cap = 0
+
+    for entry in ranked_pool:
         if candidates_created >= max_new_opportunities_per_run:
             candidates_skipped_cap += 1
             continue
 
-        _create_opportunity_with_evidence(db, normalized, candidates)
+        _create_opportunity_with_evidence(db, entry["normalized"], entry["candidates"])
         db.commit()
         candidates_created += 1
 
