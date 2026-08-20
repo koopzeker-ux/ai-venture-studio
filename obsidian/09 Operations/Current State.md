@@ -1,5 +1,21 @@
 # Current State
 
+## Milestone M2.2 — PLANNING, awaiting approval (2026-08-20)
+Trigger: the live M2.1 run collected 80 real signals (30 Hacker News,
+50 Product Hunt/RSS) but produced 0 candidates. Diagnosis (backed by
+inspecting the real stored rows): (1) `hackernews.py` used Algolia's
+`search_by_date` (recency-sorted), so points were 1-12 against a
+traction threshold of 50 — structurally can't fire; (2) RSS/Product
+Hunt entries are short marketing taglines with a fixed "Discussion |
+Link" suffix, not organic complaint language, so the keyword triggers
+structurally can't match, and RSS signals never carry an
+`engagement_score` so the traction trigger can't fire either — RSS
+signals could not produce a candidate under any circumstance in the
+M2.1 design. Full plan (deterministic-engine fixes, LLM
+provider/cost research for a later approval decision, evidence
+enrichment via title-similarity, updated agent prompts) presented to
+the project owner for review; nothing implemented yet.
+
 ## Version
 MVP v0.1 foundation
 
