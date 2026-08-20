@@ -1,0 +1,50 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+*.crt
+secrets/
+secrets.*
+credentials/
+credentials.*
+*credentials*.json
+*token*.json
+.aws/
+.ssh/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Node (in case frontend is added later)
+node_modules/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Local data / DB
+postgres_data/
+*.sqlite3
+*.db
+
+# Obsidian local workspace state (not shared config)
+obsidian/.obsidian/workspace*
+obsidian/.obsidian/plugins/
