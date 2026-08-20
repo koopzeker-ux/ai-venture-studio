@@ -23,3 +23,24 @@
   three agents work in parallel without merge conflicts. LEAD does no
   feature work during M1 and merges nothing to `main` until REVIEWER
   has checked results. Approved by project owner.
+- 2026-08-20: Security incident during M1 Telegram setup — the original
+  `TELEGRAM_BOT_TOKEN` was briefly exposed in local tool output because
+  `source .env` mis-parsed the file's CRLF line endings. No commit, push,
+  or external transmission of the token occurred. Why logged: per
+  CLAUDE.md §4, secrets must never appear in logs/output; even a local,
+  non-persisted exposure is treated as a compromise. Response: token
+  rotated immediately via BotFather before any further use; all
+  subsequent `.env` handling switched to an in-process Python parser
+  that never prints values. Decided/handled by LEAD, confirmed by
+  project owner ("gereed").
+- 2026-08-20: Milestone M1 marked COMPLETE. Why: the full chain (Docker
+  -> PostgreSQL -> FastAPI -> Opportunity -> Scoring -> Telegram) was
+  verified live against the real stack — `api` container recreated with
+  new Telegram credentials, `/api/health` OK, a real opportunity scored
+  above the alert threshold produced `telegram_alert_sent: true` via the
+  running container (confirmed via container logs, not a standalone
+  script), and the resulting row was confirmed persisted in the real
+  PostgreSQL container. This closes the gap noted in the earlier M1
+  integration entry, where only Python/SQLite-level verification existed
+  because Docker/WSL wasn't installed yet. Approved by project owner
+  (who installed and confirmed Docker Desktop + WSL2 themselves).

@@ -25,11 +25,12 @@ MVP v0.1 foundation
 - Production VPS hardening
 
 ## Next milestone
-Run the stack, verify PostgreSQL + API, configure Telegram, then implement the first real Market Intelligence collector.
+Implement the first real Market Intelligence collector.
 
-## Current milestone: M1 (started 2026-08-20) — IN PROGRESS, NOT COMPLETE
+## Milestone M1 — COMPLETE (2026-08-20)
 Goal: Docker -> PostgreSQL -> FastAPI -> opportunity scoring -> Telegram
-alert fully working end-to-end.
+alert fully working end-to-end. **Achieved and verified against the real
+stack**, not just at the test level.
 
 Parallel work via Git worktrees (`../avs-builder`, `../avs-intelligence`,
 `../avs-reviewer` on branches `agent/builder`, `agent/intelligence`,
@@ -57,20 +58,35 @@ the reviewer version). No other files overlapped. Full backend test
 suite after merge: **18 passed, 0 failed**. Diff scanned for secrets
 before push — none found (only fake test tokens like `"123:abc"`).
 
-**What's still open before M1 can be called done:**
-- The actual Docker Compose stack (`db` + `api` containers) has never
-  been run on this machine — Docker/WSL is not installed. Everything
-  verified so far is at the Python/SQLite test level, not against a
-  real running PostgreSQL + containerized FastAPI.
-- `scripts/smoke_test.sh` has not been executed against a live stack.
-- Telegram alert has not been exercised against the real Telegram API
-  (only mocked in tests) — needs a configured bot token/chat id.
+**Real end-to-end verification (2026-08-20, after Docker Desktop + WSL2
+were installed and confirmed working by the user):**
+- Telegram bot token configured in local `.env`; original token was
+  briefly exposed in a local tool-output during setup due to a shell
+  `.env`-parsing bug and was immediately rotated via BotFather as a
+  precaution before any further use. New token verified via Telegram
+  `getMe`. Chat id resolved via `getUpdates` (exactly one private chat
+  found) and written to local `.env`. Neither the token nor the chat id
+  were ever committed, logged to this repo, or shown in any report.
+- `api` container force-recreated (db untouched) so the new env vars
+  loaded; `docker compose ps` showed both `db` (healthy) and `api` (up);
+  `GET /api/health` returned `{"status":"ok"}`.
+- A real opportunity was created and scored via the live API
+  (`POST /api/opportunities`, `POST /api/opportunities/{id}/score`)
+  with factors/evidence_confidence set to clear the alert threshold.
+  Response: `score: 100`, `telegram_alert_sent: true`. Verified this
+  ran through the actual container (via `docker compose logs api`,
+  clean 200s, no errors) — not a standalone Python call outside Docker.
+- Data confirmed persisted in the real PostgreSQL container via
+  `docker compose exec db psql` (not SQLite/in-memory).
+- Full chain now proven live: Docker -> PostgreSQL -> FastAPI ->
+  Opportunity -> Scoring -> Telegram.
 
-Per explicit instruction: Docker/WSL is NOT to be installed and no
-production deployment happens as part of closing this out
-autonomously — the real end-to-end run needs the user's machine/
-approval.
+**Known gap, not required for M1:** `scripts/smoke_test.sh` was not
+re-run in this final pass (health endpoint was checked directly
+instead); worth running once as a formality.
 
-LEAD performed no feature work during M1; LEAD reviewed both branches,
-confirmed scope was respected, resolved the merge conflict, and merged
-after the full suite passed.
+LEAD performed no feature work during M1 beyond docs/config and
+conflict resolution; LEAD reviewed both branches, confirmed scope was
+respected, resolved the one merge conflict, merged after the full test
+suite passed, and then verified the live end-to-end chain before
+marking M1 complete.
