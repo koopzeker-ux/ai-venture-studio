@@ -98,3 +98,28 @@
   proven via REVIEWER's automated regression test and M1's earlier live
   verification. No Reddit/YouTube/Google Trends added, no secrets, no
   production deploy. Approved by project owner.
+- 2026-08-20: Milestone M2.2 marked COMPLETE. Scope: fix the M2.1
+  detection gap (wrong HN query for traction; RSS content structurally
+  unable to trigger any heuristic) with a source-agnostic
+  `is_launch` metadata field, new purchase-intent/alternative-seeking
+  triggers, and a promotion gate. Key decision made before any code was
+  written: `product_launch_signal` must never promote an Opportunity
+  alone — an earlier draft would have let it, which given Product
+  Hunt's feed marking ~50/80 live signals as launches would have
+  flooded the pipeline with candidates purely because products exist.
+  Also decided: defer automatic evidence-enrichment via Jaccard
+  title-overlap — a live test against realistic short PH/HN titles
+  showed 4/5 unrelated pairs crossing a 0.5 threshold on shared
+  stopwords alone, a real false-merge risk, not a hypothetical one.
+  Why complete: full suite green (92/92, including REVIEWER's
+  independent negative-case proof), and live verification against real
+  Docker/PostgreSQL produced 20 real Opportunities (all via genuine HN
+  traction, e.g. "Steve Jobs has passed away", "backdoor in upstream
+  xz/liblzma") while zero launch-only signals promoted on their own
+  out of a real batch of 58 (8 HN + 50 PH). One edge case recorded but
+  not "fixed": a single Show-HN post that gamed both triggers landed
+  just past the volume cap (first-come-first-served by design, not
+  score-ranked) — documented, not silently patched. M1 scoring/
+  Telegram confirmed intact with a real, live alert send. No Reddit/
+  YouTube/Google Trends, no LLM, no threshold tuning without approval.
+  Approved by project owner.

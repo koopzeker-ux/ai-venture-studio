@@ -1,6 +1,18 @@
 # Current State
 
-## Milestone M2.2 — IMPLEMENTATION INTEGRATED, INDEPENDENT REVIEWER VALIDATION PENDING (2026-08-20)
+## Milestone M2.2 — COMPLETE (2026-08-20)
+REVIEWER integrated (commit `da5e2e5`, merge `b623e01`), full suite
+green (92/92), and — for the first time — verified live against real
+Hacker News + Product Hunt data: the promotion gate correctly produced
+**20 real Opportunity candidates** (all via `traction_signal`, e.g.
+"Steve Jobs has passed away", "backdoor in upstream xz/liblzma",
+"CrowdStrike update: Windows bluescreen"), while `product_launch_signal`
+correctly promoted **zero** signals on its own out of the real batch
+(8 HN `is_launch=True` signals, 50 Product Hunt signals). Full detail
+below. M1's scoring -> Telegram path confirmed intact via a live,
+real alert send. Genuine milestone close, not carried forward.
+
+## Milestone M2.2 — integration history (superseded by COMPLETE above)
 Not complete yet. Goal: turn the 0/80-candidate M2.1 result into real,
 precision-first candidate detection without flooding the pipeline —
 see the M2.1 diagnosis below for why 0/80 happened.
@@ -61,12 +73,72 @@ this exact kind of data. Not built.
 - Diff scanned for secrets: none found. No Reddit/YouTube/Google
   Trends, no LLM code, no new dependency, no new secret.
 
-**What's still open:** REVIEWER has not yet produced independent
-validation tests for the new gate/triggers (they correctly stopped
-last round rather than test against not-yet-integrated code). No live
-collector run against Docker/PostgreSQL has been done for M2.2 yet —
-not required before REVIEWER's validation per the project owner's
-instruction.
+**REVIEWER integrated** (commit `da5e2e5`, merge `b623e01`): tests
+only, no production code touched. Independent proof that a bulk
+20-item Product-Hunt-shaped launch-only batch produces zero
+Opportunities; that launch+traction and launch+pain each promote with
+both Evidence types attached; that a low-traction "Show HN:" post
+stays unpromoted; that the volume cap behaves correctly; and
+independent confirmation that LEAD's `94d83c5` test-compatibility fix
+was correct. Full suite after this merge: **92 passed, 0 failed**.
+
+**Live verification against the real Docker/PostgreSQL stack
+(2026-08-20):**
+- `api` image rebuilt and container recreated with the M2.2 code;
+  `docker compose ps` showed both services up, `db` healthy;
+  `GET /api/health` OK; PostgreSQL reachable directly.
+- Ran `python -m app.collectors.run_collectors` for real: **110 raw
+  signals** (60 Hacker News — both the recency and the new
+  points-filtered traction query, already deduplicated on `objectID`
+  within the connector — + 50 Product Hunt/RSS). Of these, **62 were
+  genuinely new** signals (60 HN, 2 RSS — the other 48 RSS items were
+  already stored from the earlier M2.1 run, correctly deduplicated by
+  `source_url`).
+- **30 of the new Hacker News signals** had `engagement_score >= 50`
+  (the traction query doing exactly what it was built for). **8 new HN
+  signals** had `is_launch=True` (`"Show HN:"` titles); **all 50**
+  Product Hunt signals had `is_launch=True`.
+- **Promotion gate result: 20 real Opportunities created**, every one
+  via `traction_signal` alone (real, high-engagement HN classics —
+  "Steve Jobs has passed away" (4338 pts), "OpenAI's board has fired
+  Sam Altman" (5771 pts), "backdoor in upstream xz/liblzma" (4549
+  pts), "CrowdStrike update: Windows bluescreen and boot loops" (4489
+  pts), among others). **Zero** of the 8 launch-flagged HN signals and
+  **zero** of the 50 Product-Hunt-launch signals promoted on
+  `product_launch_signal` alone — confirmed correct, not a detection
+  gap: their content held no pain/purchase-intent/alternative-seeking
+  language and (for the 7 ordinary Show HN posts) too little
+  engagement.
+- **Notable edge case, correctly handled but worth recording:** one
+  "Show HN:" post ("This up votes itself") had genuinely gamed its way
+  to 3531 points — both `product_launch_signal` and `traction_signal`
+  fired on it, and it was eligible to promote. It did **not** get an
+  Opportunity — not a gate failure, but the volume cap
+  (`MAX_NEW_OPPORTUNITIES_PER_RUN=20`): 30 signals qualified via
+  traction this run, only the first 20 processed were promoted
+  (`candidates_skipped_cap = 10`), and this one landed just after the
+  cap by processing order. The cap is documented as first-come-
+  first-served, not score-ranked — this is expected behavior of that
+  design, not a bug, and no threshold/logic was changed to "fix" it.
+- **Dedupe proven live again:** re-ran the collector immediately after
+  — still exactly 142 signals and 22 opportunities (2 pre-existing
+  from M1 + 20 new), zero growth on either.
+- **M1 regression, live:** inspected full provenance/evidence for one
+  real candidate (correct source_url, evidence_type, confidence=0.3,
+  independently_confirmed=false, thesis correctly labeled as
+  unverified triage). Scored it manually via the live API — below
+  threshold, no alert (correct). Scored a second real candidate with
+  maxed factors as a deliberate mechanical test of the alert path —
+  `score: 100`, `evidence_confidence: 80`, **`telegram_alert_sent:
+  true`**, confirmed via `docker compose logs api` (clean 200 OK, no
+  errors). M1's scoring/Telegram pipeline is unaffected by M2.2.
+- No Reddit/YouTube/Google Trends, no LLM, no threshold/phrase tuning,
+  no new secrets or dependencies.
+
+M2.2 completion criteria (all met): REVIEWER integrated; full suite
+green; live collectors ran for real; live promotion gate proven
+correct (including the cap edge case); dedupe proven live twice now;
+M1 scoring/Telegram intact.
 
 ---
 
