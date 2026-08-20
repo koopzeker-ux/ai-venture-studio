@@ -1,6 +1,76 @@
 # Current State
 
-## Milestone M2.2 — PLANNING, awaiting approval (2026-08-20)
+## Milestone M2.2 — IMPLEMENTATION INTEGRATED, INDEPENDENT REVIEWER VALIDATION PENDING (2026-08-20)
+Not complete yet. Goal: turn the 0/80-candidate M2.1 result into real,
+precision-first candidate detection without flooding the pipeline —
+see the M2.1 diagnosis below for why 0/80 happened.
+
+**Plan correction before implementation:** the first M2.2 draft let a
+bare `product_launch_signal` promote to an Opportunity on its own.
+Rejected before any code was written — Product Hunt's RSS feed marks
+~50/80 live signals as `is_launch=True`, which would have flooded the
+pipeline with candidates purely because products exist, not because
+there's real evidence of demand. Also evaluated and **deferred**:
+automatic evidence-enrichment via Jaccard title-overlap — a live test
+against realistic short PH/HN-style titles showed 4 of 5 unrelated
+title pairs crossing a 0.5 similarity threshold purely on shared
+stopwords ("for", "the new", "ai", "api"), a real false-merge risk on
+this exact kind of data. Not built.
+
+**Integrated (2026-08-20):**
+- `agent/builder` (commit `0d1ee1a`, merge `f472762`): `hackernews.py`
+  now runs two independent Algolia queries — the existing
+  `search_by_date` (recency) plus a new `search` with
+  `numericFilters=points>50` (traction) — each error-handled
+  separately, combined and deduplicated on `objectID` within the call.
+  Both connectors now set a generic `metadata.is_launch: bool` (HN:
+  only on a `"Show HN:"`/`"Launch HN:"` title prefix; RSS: always
+  `True`). Only `hackernews.py` and `rss.py` touched — verified against
+  its own parent commit, not against a stale `main` diff.
+- `agent/intelligence` (commit `2c7205f`, merge `8fef6c3`): new
+  `purchase_intent_signal` and `alternative_seeking_signal` triggers;
+  a `STRONG_EVIDENCE_TYPES` classification that deliberately excludes
+  `product_launch_signal` — promotion to an Opportunity now requires
+  at least one strong trigger (`pipeline.passes_candidate_gate`); the
+  existing volume cap (`MAX_NEW_OPPORTUNITIES_PER_RUN`, default 20)
+  becomes an explicit secondary safety net, not the primary filter
+  (`candidates_skipped_cap` reported separately). Verified: `pipeline.py`
+  / `candidate_filter.py` / `normalize.py` still contain zero
+  connector-specific logic.
+- Both merges were clean, no git conflicts. **Two of REVIEWER's own
+  M2.1 tests broke** as a side effect of these additive changes (not a
+  functional regression): `test_hackernews_resilience.py` referenced
+  the old single-query constant name and asserted a single fixed query
+  URL; `test_collector_pipeline_e2e.py` asserted exact dict equality on
+  `process_raw_signals()`'s return value, missing the new
+  `candidates_skipped_cap` key. LEAD repaired both minimally (same
+  assertions, updated to the new-but-compatible shape) rather than
+  push with a red suite — documented in commit `94d83c5` for REVIEWER
+  to see exactly what changed and why.
+- Full backend pytest suite after merge + repair: **86 passed, 0
+  failed** (60 existing + 10 new gate/trigger tests + 16 from expanded
+  normalize/candidate_filter/dedupe coverage).
+- Explicitly verified with named, passing tests: launch-only signal ->
+  0 Opportunities (`test_launch_only_signal_creates_no_opportunity`);
+  launch + a strong trigger -> 1 Opportunity with both Evidence types
+  (`test_launch_plus_strong_signal_creates_one_opportunity_with_both_evidence`);
+  purchase-intent and alternative-seeking each promote alone
+  (`test_each_strong_type_can_promote_alone[...]`); volume guardrail
+  caps correctly and reports skips
+  (`test_volume_guardrail_caps_opportunities_and_reports_skipped`).
+- Diff scanned for secrets: none found. No Reddit/YouTube/Google
+  Trends, no LLM code, no new dependency, no new secret.
+
+**What's still open:** REVIEWER has not yet produced independent
+validation tests for the new gate/triggers (they correctly stopped
+last round rather than test against not-yet-integrated code). No live
+collector run against Docker/PostgreSQL has been done for M2.2 yet —
+not required before REVIEWER's validation per the project owner's
+instruction.
+
+---
+
+## Milestone M2.1 diagnosis (context for the above, 2026-08-20)
 Trigger: the live M2.1 run collected 80 real signals (30 Hacker News,
 50 Product Hunt/RSS) but produced 0 candidates. Diagnosis (backed by
 inspecting the real stored rows): (1) `hackernews.py` used Algolia's
@@ -11,10 +81,7 @@ Link" suffix, not organic complaint language, so the keyword triggers
 structurally can't match, and RSS signals never carry an
 `engagement_score` so the traction trigger can't fire either — RSS
 signals could not produce a candidate under any circumstance in the
-M2.1 design. Full plan (deterministic-engine fixes, LLM
-provider/cost research for a later approval decision, evidence
-enrichment via title-similarity, updated agent prompts) presented to
-the project owner for review; nothing implemented yet.
+M2.1 design.
 
 ## Version
 MVP v0.1 foundation
