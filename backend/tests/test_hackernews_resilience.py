@@ -19,7 +19,7 @@ class _FakeResponse:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            request = httpx.Request("GET", hackernews.ALGOLIA_HN_SEARCH_URL)
+            request = httpx.Request("GET", hackernews.ALGOLIA_SEARCH_BY_DATE_URL)
             response = httpx.Response(self.status_code, request=request)
             raise httpx.HTTPStatusError("error", request=request, response=response)
 
@@ -45,7 +45,11 @@ def test_fetch_recent_signals_success(monkeypatch):
     ]
 
     def fake_get(url, params=None, timeout=None):
-        assert url == hackernews.ALGOLIA_HN_SEARCH_URL
+        # M2.2: fetch_recent_signals() now issues two independent queries
+        # (recency + traction); both are exercised here and return the
+        # same hits, so the connector's own objectID dedup collapses them
+        # back to one signal — same assertion as before the split.
+        assert url in (hackernews.ALGOLIA_SEARCH_BY_DATE_URL, hackernews.ALGOLIA_SEARCH_URL)
         return _FakeResponse(200, {"hits": hits})
 
     monkeypatch.setattr(hackernews.httpx, "get", fake_get)

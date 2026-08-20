@@ -93,6 +93,9 @@ def test_single_pipeline_call_processes_hackernews_and_rss_signals_through_ident
         "signals_new": 3,
         "signals_duplicate": 0,
         "candidates_created": 2,
+        # M2.2: process_raw_signals() gained a secondary volume-cap
+        # counter; well under MAX_NEW_OPPORTUNITIES_PER_RUN here.
+        "candidates_skipped_cap": 0,
     }
 
     stored_signals = db_session.scalars(select(Signal)).all()
