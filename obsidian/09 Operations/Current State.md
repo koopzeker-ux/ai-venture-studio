@@ -1,5 +1,55 @@
 # Current State
 
+## Milestone M3.1 — IMPLEMENTATION INTEGRATED, INDEPENDENT REVIEWER VALIDATION PENDING (2026-08-20)
+Not complete yet. Goal (M3.1 only — first slice of the "Opportunity
+Research & Prioritization Engine" milestone): replace the M2.2 volume
+cap's first-come-first-served ordering with deterministic,
+commercial-priority pre-ranking. No LLM in this slice — see the M3
+plan for the fully-designed but not-yet-approved M3.2 (Researcher) and
+M3.3 (Critic + automatic Evidence Confidence + Telegram gate).
+
+Trigger: live M2.2 data showed all 20 real candidates were pure
+`traction_signal` (viral historical news — "Steve Jobs has passed
+away", "Stephen Hawking has died" — zero commercial signal), and which
+20 of 30 traction-qualifying signals got in was pure luck of Algolia's
+response order, not quality.
+
+**Integrated (2026-08-20):**
+- `agent/builder` (commit `056b459`, merge `fd03a8a`): every collector
+  run now persists exactly one `AgentRun` row (existing schema fields
+  only — no migration), and a failed pipeline run is logged and
+  reported instead of crashing. Added a read-only
+  `GET /api/opportunities/{id}` returning the opportunity plus its
+  full evidence list (needed so a human can review evidence before
+  scoring — will matter more once M3.2's Researcher exists). No
+  existing routes changed.
+- `agent/intelligence` (commit `945402f`, merge `bd220e2`): added
+  `compute_pre_rank_score()` (signal-diversity weighting + purchase-
+  intent/alternative-seeking/pain-point bonuses + a log-scaled,
+  **capped** engagement bonus so raw virality can't dominate) and
+  restructured `process_raw_signals()` into two phases — collect all
+  gate-passing candidates first, then sort by
+  `(-pre_rank_score, source_url)` before applying the volume cap.
+  Proven input-order-independent (3 shuffled orderings of the same
+  candidate set produce identical selections) and proven that a
+  modest-engagement (60) purchase-intent+traction candidate outranks a
+  pure-traction candidate at engagement=6015 — the exact real M2.2
+  scenario, reproduced as a test. An explicit test confirms
+  `compute_pre_rank_score` never writes to `Opportunity.score` or
+  `evidence_confidence`.
+- Both merges clean, no conflicts (each commit verified against its
+  own parent — both were based on current `main`, no staleness this
+  round).
+- Full backend pytest suite after merge: **109 passed, 0 failed** (92
+  existing + 17 new ranking/detail-endpoint tests).
+- Diff scanned for secrets: none found. No schema migration, no LLM
+  code, no new dependency, no new secret.
+
+**What's still open:** REVIEWER has not yet produced independent
+validation for the pre-ranking fix or the new detail endpoint. No live
+collector run against Docker/PostgreSQL has been done for M3.1 yet —
+not required before REVIEWER's validation.
+
 ## Milestone M2.2 — COMPLETE (2026-08-20)
 REVIEWER integrated (commit `da5e2e5`, merge `b623e01`), full suite
 green (92/92), and — for the first time — verified live against real
