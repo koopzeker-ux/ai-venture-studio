@@ -81,3 +81,20 @@
   before use, not assumed safe). Decided by LEAD after explicit
   correction from the project owner; revised plan presented for review
   before implementation.
+- 2026-08-20: Milestone M2.1 marked COMPLETE. Why: all three agent
+  branches merged cleanly into `main` (no real conflicts — apparent
+  conflicts from stale branch bases were verified as artifacts, not
+  actual edits, before merging), full backend suite passed at every
+  step (18 -> 42 -> 60 tests), and the pipeline was verified live
+  against the real Docker/PostgreSQL stack: a schema-drift gap
+  (missing unique constraint on `signals.source_url` on the
+  already-existing table) was found, checked for existing duplicates
+  (none), and closed with a reviewed `ALTER TABLE ... UNIQUE`; real
+  Hacker News (30) and Product Hunt RSS (50) signals were collected and
+  stored with correct provenance; a second run proved dedupe live (0
+  new rows). No real candidate matched the heuristic triggers on this
+  batch (explained by fresh/low-engagement HN data and no keyword
+  matches, not a defect) — the score->Telegram path itself stays
+  proven via REVIEWER's automated regression test and M1's earlier live
+  verification. No Reddit/YouTube/Google Trends added, no secrets, no
+  production deploy. Approved by project owner.
