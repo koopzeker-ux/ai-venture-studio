@@ -94,5 +94,6 @@ def _normalize_entry(entry, feed_url: str) -> dict | None:
         "metadata": {
             "engagement_score": None,
             "published_at": published_at,
+            "is_launch": True,
         },
     }
