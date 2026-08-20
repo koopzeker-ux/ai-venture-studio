@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
 
+    rss_feed_urls: str = "https://www.producthunt.com/feed"
+    hackernews_enabled: bool = True
+    rss_enabled: bool = True
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
