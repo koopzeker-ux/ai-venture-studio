@@ -91,7 +91,64 @@ respected, resolved the one merge conflict, merged after the full test
 suite passed, and then verified the live end-to-end chain before
 marking M1 complete.
 
-## Milestone M2.1 — PLANNED, not started (revised 2026-08-20)
+## Milestone M2.1 — IMPLEMENTATION INTEGRATED, REVIEWER VALIDATION PENDING (2026-08-20)
+Not complete yet. BUILDER's and INTELLIGENCE's work is merged into
+`main` and the full backend test suite passes, but REVIEWER has not
+yet produced the end-to-end/resilience tests, and the pipeline has not
+been verified against the live Docker/PostgreSQL stack.
+
+**Integrated:**
+- `agent/builder` (commit `4417b34`, merge `1f8485b`): Hacker News
+  connector (Algolia HN Search API, no auth) + generic RSS/Atom
+  connector (fetch via `httpx`, parse via `feedparser`) + generic
+  multi-connector CLI entrypoint (`run_collectors.py`) + non-secret
+  config (`HACKERNEWS_ENABLED`, `RSS_ENABLED`, `RSS_FEED_URLS`).
+- `agent/intelligence` (commit `a4fd742`, merge `98d2fb1`):
+  source-agnostic `normalize.py` + `candidate_filter.py` (keyword OR
+  engagement-threshold triggers) + `pipeline.py` (dedupe via a DB
+  unique constraint on `Signal.source_url`, then `Opportunity`+
+  `Evidence` creation for matches). Proven source-agnostic in tests
+  using fictitious source names, not tied to hackernews/rss.
+- Both merges were clean fast, no-conflict 3-way merges (each agent's
+  own commit only touched files in their assigned scope — the large
+  diffs seen when comparing branch-vs-current-main were a staleness
+  artifact from branching off an older `main`, not actual edits to
+  M1/REVIEWER files; verified before merging by diffing each commit
+  against its own parent).
+- Full backend pytest suite after merge: **42 passed, 0 failed** (18
+  from M1 + 24 new: candidate_filter, normalize, pipeline_dedupe).
+- Diff scanned for secrets: none found. No Reddit code. No new secrets
+  or paid providers introduced.
+
+**Known gap found during integration review, blocking live
+verification:** the live PostgreSQL `signals` table (already created
+during M1) does **not** yet have the new unique constraint on
+`source_url` — `Base.metadata.create_all()` only creates missing
+tables, it does not alter existing ones. Until this is applied (no
+Alembic yet — either a manual, reviewed `ALTER TABLE signals ADD
+CONSTRAINT ... UNIQUE (source_url)` on the local dev DB, or a fresh
+`db` volume), the live dedupe behavior will not actually work even
+though all tests pass against a fresh in-memory SQLite schema.
+
+**What REVIEWER should test:**
+- End-to-end pipeline test mixing both connectors' fixtures through
+  one `process_raw_signals()` call (objective proof of
+  source-agnosticism), plus resilience tests for `hackernews.py` and
+  `rss.py` (mocked HTTP only, no real network calls) — per the M2.1
+  task prompt.
+- The M1 regression check: score a pipeline-created candidate above
+  threshold via the live endpoint and confirm `telegram_alert_sent`
+  still works unchanged.
+- Live verification against Docker: apply the `signals.source_url`
+  unique constraint to the running dev database first (see gap above),
+  then run `python -m app.collectors.run_collectors` inside the `api`
+  container and confirm real Signal/Opportunity/Evidence rows appear
+  with correct provenance, and that a second run does not duplicate.
+
+M2.1 will only be marked complete after REVIEWER's validation and a
+live run against the real stack, per the project owner's instruction.
+
+## Milestone M2.1 planning history (superseded, revised 2026-08-20)
 Goal: first real vertical slice of Market Intelligence — collect real
 signals from source-agnostic connectors, normalize/dedupe them, and
 turn matching ones into opportunity candidates (status `discovered`)
