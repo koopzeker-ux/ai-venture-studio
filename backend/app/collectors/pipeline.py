@@ -11,10 +11,27 @@ import re
 from sqlalchemy.exc import IntegrityError
 
 from app.models.entities import Evidence, Opportunity, Signal
-from app.services.candidate_filter import DEFAULT_ENGAGEMENT_THRESHOLD, detect_candidates
+from app.services.candidate_filter import (
+    DEFAULT_ENGAGEMENT_THRESHOLD,
+    STRONG_EVIDENCE_TYPES,
+    detect_candidates,
+)
 from app.services.normalize import normalize_raw_signal
 
 _SLUG_NOISE_RE = re.compile(r"[^a-z0-9]+")
+
+# Secondary safety net only. The candidate gate (passes_candidate_gate) is
+# the primary quality filter — this cap must never be used to paper over
+# weak candidate detection, only to bound run size once genuinely strong
+# signals arrive in volume.
+MAX_NEW_OPPORTUNITIES_PER_RUN = 20
+
+
+def passes_candidate_gate(evidence_types: set[str]) -> bool:
+    """A signal is only promoted to an Opportunity if at least one STRONG
+    trigger fired. product_launch_signal alone never passes this gate — a
+    launch is context, not standalone evidence of demand."""
+    return bool(evidence_types & STRONG_EVIDENCE_TYPES)
 
 
 def _slugify(text: str, uniqueness_key: str) -> str:
@@ -64,11 +81,17 @@ def _create_opportunity_with_evidence(db, normalized: dict, candidates: list[dic
     return opportunity
 
 
-def process_raw_signals(db, raw_signals: list[dict], engagement_threshold: int = DEFAULT_ENGAGEMENT_THRESHOLD) -> dict:
+def process_raw_signals(
+    db,
+    raw_signals: list[dict],
+    engagement_threshold: int = DEFAULT_ENGAGEMENT_THRESHOLD,
+    max_new_opportunities_per_run: int = MAX_NEW_OPPORTUNITIES_PER_RUN,
+) -> dict:
     signals_seen = 0
     signals_new = 0
     signals_duplicate = 0
     candidates_created = 0
+    candidates_skipped_cap = 0
 
     for raw in raw_signals:
         normalized = normalize_raw_signal(raw)
@@ -92,14 +115,27 @@ def process_raw_signals(db, raw_signals: list[dict], engagement_threshold: int =
         signals_new += 1
 
         candidates = detect_candidates(normalized, engagement_threshold=engagement_threshold)
-        if candidates:
-            _create_opportunity_with_evidence(db, normalized, candidates)
-            db.commit()
-            candidates_created += 1
+        if not candidates:
+            continue
+
+        candidate_types = {candidate["evidence_type"] for candidate in candidates}
+        if not passes_candidate_gate(candidate_types):
+            # e.g. product_launch_signal fired alone — context, not evidence.
+            # Signal (incl. metadata_json["is_launch"]) stays saved above.
+            continue
+
+        if candidates_created >= max_new_opportunities_per_run:
+            candidates_skipped_cap += 1
+            continue
+
+        _create_opportunity_with_evidence(db, normalized, candidates)
+        db.commit()
+        candidates_created += 1
 
     return {
         "signals_seen": signals_seen,
         "signals_new": signals_new,
         "signals_duplicate": signals_duplicate,
         "candidates_created": candidates_created,
+        "candidates_skipped_cap": candidates_skipped_cap,
     }

@@ -4,30 +4,72 @@ Operates only on normalized signal fields (title/content/metadata) —
 no knowledge of any specific source. These are cheap triage heuristics,
 NOT the Opportunity Score (see CLAUDE.md §12: Evidence Confidence is a
 separate axis from Opportunity Score).
+
+detect_candidates() returns every trigger that fired. It does NOT decide
+which combinations are allowed to create an Opportunity — that promotion
+gate lives in pipeline.py, using the STRONG_EVIDENCE_TYPES classification
+below. product_launch_signal is deliberately excluded from that set: a
+launch is context, not evidence of demand.
 """
 import re
 
 DEFAULT_ENGAGEMENT_THRESHOLD = 50
 
 EVIDENCE_TYPE_PAIN_POINT = "pain_point_signal"
+EVIDENCE_TYPE_PURCHASE_INTENT = "purchase_intent_signal"
+EVIDENCE_TYPE_ALTERNATIVE_SEEKING = "alternative_seeking_signal"
 EVIDENCE_TYPE_TRACTION = "traction_signal"
+EVIDENCE_TYPE_PRODUCT_LAUNCH = "product_launch_signal"
+
+# Strong = independently credible evidence of demand/pain/traction.
+# product_launch_signal is intentionally NOT here — a launch alone is not
+# promotion-worthy (see CLAUDE.md M2.2 task: Product Hunt marks ~50/80
+# live signals as is_launch=True, which would otherwise flood the pipeline
+# with candidates purely because products exist).
+STRONG_EVIDENCE_TYPES = {
+    EVIDENCE_TYPE_PAIN_POINT,
+    EVIDENCE_TYPE_PURCHASE_INTENT,
+    EVIDENCE_TYPE_ALTERNATIVE_SEEKING,
+    EVIDENCE_TYPE_TRACTION,
+}
 
 PAIN_POINT_PHRASES = [
     "wish there was",
     "does anyone know a tool",
     "so annoying that",
+]
+
+PURCHASE_INTENT_PHRASES = [
+    "would pay for",
+    "take my money",
+    "how much does this cost",
+    "is there a paid plan",
+]
+
+ALTERNATIVE_SEEKING_PHRASES = [
     "looking for an alternative to",
+    "is there a better alternative to",
+    "recommend an alternative to",
 ]
 
 _PAIN_POINT_PATTERNS = [re.compile(re.escape(phrase), re.IGNORECASE) for phrase in PAIN_POINT_PHRASES]
+_PURCHASE_INTENT_PATTERNS = [re.compile(re.escape(phrase), re.IGNORECASE) for phrase in PURCHASE_INTENT_PHRASES]
+_ALTERNATIVE_SEEKING_PATTERNS = [re.compile(re.escape(phrase), re.IGNORECASE) for phrase in ALTERNATIVE_SEEKING_PHRASES]
 _PAYING_FOR_BUT_PATTERN = re.compile(r"paying for .+? but", re.IGNORECASE)
 
 
-def _matched_pain_point_phrase(text: str) -> str | None:
-    for pattern in _PAIN_POINT_PATTERNS:
+def _first_match(patterns: list[re.Pattern], text: str) -> str | None:
+    for pattern in patterns:
         match = pattern.search(text)
         if match:
             return match.group(0)
+    return None
+
+
+def _matched_pain_point_phrase(text: str) -> str | None:
+    phrase = _first_match(_PAIN_POINT_PATTERNS, text)
+    if phrase:
+        return phrase
 
     match = _PAYING_FOR_BUT_PATTERN.search(text)
     if match:
@@ -37,26 +79,49 @@ def _matched_pain_point_phrase(text: str) -> str | None:
 
 
 def detect_candidates(normalized_signal: dict, engagement_threshold: int = DEFAULT_ENGAGEMENT_THRESHOLD) -> list[dict]:
-    """Return a list of triggered heuristic candidates (0, 1, or 2 entries).
+    """Return every triggered heuristic candidate (0..5 entries).
 
     Each entry: {"evidence_type": str, "trigger_detail": str}
-    Triggers are independent — a signal can match either, both, or neither.
+    Triggers are independent — a signal can match any combination, including
+    none. This function does not gate promotion to Opportunity; see
+    STRONG_EVIDENCE_TYPES and pipeline.py's candidate gate for that.
     """
     candidates: list[dict] = []
     text = f"{normalized_signal.get('title') or ''} {normalized_signal.get('content') or ''}"
+    metadata = normalized_signal.get("metadata") or {}
 
-    phrase = _matched_pain_point_phrase(text)
-    if phrase:
+    pain_phrase = _matched_pain_point_phrase(text)
+    if pain_phrase:
         candidates.append({
             "evidence_type": EVIDENCE_TYPE_PAIN_POINT,
-            "trigger_detail": f"matched phrase: '{phrase}'",
+            "trigger_detail": f"matched phrase: '{pain_phrase}'",
         })
 
-    engagement_score = (normalized_signal.get("metadata") or {}).get("engagement_score")
+    purchase_phrase = _first_match(_PURCHASE_INTENT_PATTERNS, text)
+    if purchase_phrase:
+        candidates.append({
+            "evidence_type": EVIDENCE_TYPE_PURCHASE_INTENT,
+            "trigger_detail": f"matched phrase: '{purchase_phrase}'",
+        })
+
+    alternative_phrase = _first_match(_ALTERNATIVE_SEEKING_PATTERNS, text)
+    if alternative_phrase:
+        candidates.append({
+            "evidence_type": EVIDENCE_TYPE_ALTERNATIVE_SEEKING,
+            "trigger_detail": f"matched phrase: '{alternative_phrase}'",
+        })
+
+    engagement_score = metadata.get("engagement_score")
     if engagement_score is not None and engagement_score >= engagement_threshold:
         candidates.append({
             "evidence_type": EVIDENCE_TYPE_TRACTION,
             "trigger_detail": f"engagement_score={engagement_score} >= threshold={engagement_threshold}",
+        })
+
+    if metadata.get("is_launch") is True:
+        candidates.append({
+            "evidence_type": EVIDENCE_TYPE_PRODUCT_LAUNCH,
+            "trigger_detail": "is_launch=True",
         })
 
     return candidates
