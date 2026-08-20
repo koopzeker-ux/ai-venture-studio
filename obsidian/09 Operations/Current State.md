@@ -10,6 +10,10 @@ MVP v0.1 foundation
 - Opportunity scoring
 - Telegram notification integration
 - Obsidian Company Brain structure
+- Git repository initialized and pushed to `koopzeker-ux/ai-venture-studio` (main)
+- `CLAUDE.md` governance document (autonomy boundaries, security, git
+  workflow, cost budgets, human approval gates, research integrity,
+  market-intelligence scope)
 
 ## Not built yet
 - Source collectors
