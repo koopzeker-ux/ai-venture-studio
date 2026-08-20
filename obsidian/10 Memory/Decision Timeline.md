@@ -14,3 +14,12 @@
   based cost control, broadened Telegram scope, research integrity,
   market-intelligence scope, agent/model-agnostic architecture, explicit
   approval-gate list, and an explicit autonomy principle).
+- 2026-08-20: Started milestone M1 (Docker -> PostgreSQL -> FastAPI ->
+  opportunity scoring -> Telegram alert, end-to-end) using the existing
+  multi-agent Git-worktree setup (BUILDER/INTELLIGENCE/REVIEWER on
+  separate branches). Why: most of the code already existed but was
+  unverified end-to-end; splitting infra, domain/scoring, and
+  Telegram/integration-testing into disjoint file ownership lets the
+  three agents work in parallel without merge conflicts. LEAD does no
+  feature work during M1 and merges nothing to `main` until REVIEWER
+  has checked results. Approved by project owner.
