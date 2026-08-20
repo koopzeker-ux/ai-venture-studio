@@ -40,18 +40,32 @@ def _clean_published_at(value) -> float | None:
         return None
 
 
+def _clean_is_launch(value) -> bool:
+    """Coerce any raw is_launch value to a safe bool. Defaults to False for
+    missing/invalid input — never raises, never breaks the pipeline."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes"}
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return False
+
+
 def _clean_metadata(metadata: dict | None) -> dict:
     metadata = metadata or {}
     return {
         "engagement_score": _clean_engagement_score(metadata.get("engagement_score")),
         "published_at": _clean_published_at(metadata.get("published_at")),
+        "is_launch": _clean_is_launch(metadata.get("is_launch")),
     }
 
 
 def normalize_raw_signal(raw: dict) -> dict:
     """Normalize a source-agnostic raw signal dict into a clean, generic shape.
 
-    Expects: {source, source_url, title, content, metadata: {engagement_score, published_at}}
+    Expects: {source, source_url, title, content,
+              metadata: {engagement_score, published_at, is_launch}}
     """
     return {
         "source": (raw.get("source") or "").strip(),

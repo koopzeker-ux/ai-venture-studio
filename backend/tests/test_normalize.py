@@ -81,5 +81,43 @@ def test_missing_fields_default_gracefully():
         "source_url": "",
         "title": "",
         "content": "",
-        "metadata": {"engagement_score": None, "published_at": None},
+        "metadata": {"engagement_score": None, "published_at": None, "is_launch": False},
     }
+
+
+def test_is_launch_true_values_are_coerced_to_bool_true():
+    for value in [True, "true", "True", "1", "yes", 1]:
+        raw = {
+            "source": "fictitious_source_alpha",
+            "source_url": "https://example.com/launch",
+            "title": "t",
+            "content": "c",
+            "metadata": {"is_launch": value},
+        }
+        result = normalize_raw_signal(raw)
+        assert result["metadata"]["is_launch"] is True, f"expected True for {value!r}"
+
+
+def test_is_launch_false_missing_or_invalid_defaults_to_false():
+    for value in [False, "false", "0", "", 0, None, "garbage", [], {}]:
+        raw = {
+            "source": "fictitious_source_alpha",
+            "source_url": "https://example.com/no-launch",
+            "title": "t",
+            "content": "c",
+            "metadata": {"is_launch": value},
+        }
+        result = normalize_raw_signal(raw)
+        assert result["metadata"]["is_launch"] is False, f"expected False for {value!r}"
+
+
+def test_is_launch_missing_key_defaults_to_false():
+    raw = {
+        "source": "fictitious_source_alpha",
+        "source_url": "https://example.com/no-key",
+        "title": "t",
+        "content": "c",
+        "metadata": {},
+    }
+    result = normalize_raw_signal(raw)
+    assert result["metadata"]["is_launch"] is False

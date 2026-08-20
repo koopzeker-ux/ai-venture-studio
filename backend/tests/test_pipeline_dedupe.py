@@ -23,13 +23,17 @@ def db_session():
     engine.dispose()
 
 
-def _raw(source, source_url, title="", content="", engagement_score=None, published_at=None):
+def _raw(source, source_url, title="", content="", engagement_score=None, published_at=None, is_launch=False):
     return {
         "source": source,
         "source_url": source_url,
         "title": title,
         "content": content,
-        "metadata": {"engagement_score": engagement_score, "published_at": published_at},
+        "metadata": {
+            "engagement_score": engagement_score,
+            "published_at": published_at,
+            "is_launch": is_launch,
+        },
     }
 
 
@@ -72,7 +76,7 @@ def test_keyword_trigger_creates_opportunity_and_evidence(db_session):
             "fictitious_source_alpha",
             "https://alpha.example/pain",
             title="Frustrated user post",
-            content="looking for an alternative to this clunky tool",
+            content="so annoying that this clunky tool exists",
         )
     ]
     result = process_raw_signals(db_session, raw_signals)
