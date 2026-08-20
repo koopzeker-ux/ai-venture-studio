@@ -44,3 +44,18 @@
   integration entry, where only Python/SQLite-level verification existed
   because Docker/WSL wasn't installed yet. Approved by project owner
   (who installed and confirmed Docker Desktop + WSL2 themselves).
+- 2026-08-20: Planned milestone M2.1 scope — Reddit only, official
+  OAuth API (client_credentials, read-only), no LLM-based auto-scoring.
+  Why: the requested full flow (sources -> signals -> normalize ->
+  cluster/dedupe -> evidence -> candidate -> scoring -> Telegram) is
+  large; picking one ToS-compliant source and reusing M1's existing
+  scoring/Telegram pipeline unchanged keeps the first vertical slice
+  small and provable with real data, per CLAUDE.md §15 (no
+  overengineering) and §9 (no new paid provider without approval — an
+  LLM-based scorer would need one, so candidates stay unscored/
+  human-reviewed for now). YouTube/web-search/reviews/competitor
+  sources and real semantic clustering deferred to later M2.x slices.
+  Work split across BUILDER/INTELLIGENCE/REVIEWER on disjoint files,
+  same worktree pattern as M1. Presented to project owner as a plan
+  (architecture, acceptance criteria, exact agent prompts) for review
+  before any implementation starts.

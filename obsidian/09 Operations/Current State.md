@@ -25,7 +25,7 @@ MVP v0.1 foundation
 - Production VPS hardening
 
 ## Next milestone
-Implement the first real Market Intelligence collector.
+M2.1 — first real Reddit signal collector (planned, see below).
 
 ## Milestone M1 — COMPLETE (2026-08-20)
 Goal: Docker -> PostgreSQL -> FastAPI -> opportunity scoring -> Telegram
@@ -90,3 +90,33 @@ conflict resolution; LEAD reviewed both branches, confirmed scope was
 respected, resolved the one merge conflict, merged after the full test
 suite passed, and then verified the live end-to-end chain before
 marking M1 complete.
+
+## Milestone M2.1 — PLANNED, not started (2026-08-20)
+Goal: first real vertical slice of Market Intelligence — collect real
+Reddit signals, normalize/dedupe them, and turn matching ones into
+opportunity candidates (status `discovered`) with attached evidence,
+reusing the existing M1 scoring + Telegram-alert pipeline unchanged.
+
+Scope decision: only Reddit for M2.1 (official OAuth API,
+client_credentials, read-only, official rate limits respected — no
+scraping/anti-bot bypass). No LLM-based auto-scoring or auto-drafted
+thesis text yet — no model provider is approved/budgeted for that, so
+candidates stay `score = NULL` until a human scores them via the
+already-built `/opportunities/{id}/score` endpoint. YouTube/web-
+search/reviews/competitor-tracking sources and real semantic
+clustering are explicitly deferred to later M2.x slices.
+
+Work split (parallel, disjoint file ownership, same worktree pattern
+as M1 — BUILDER/INTELLIGENCE/REVIEWER push to their `agent/*` branches,
+no self-merge to `main`):
+- BUILDER: Reddit OAuth client + CLI collector entrypoint + config.
+- INTELLIGENCE: normalize + dedupe (DB-level unique constraint) +
+  pain-point/purchase-intent heuristic filter + candidate/evidence
+  creation.
+- REVIEWER: end-to-end pipeline tests (mocked HTTP, no real network
+  calls in the test suite) + resilience tests for the Reddit client +
+  regression check that M1's scoring/Telegram path still works on a
+  Reddit-sourced candidate.
+
+Full plan (architecture, acceptance criteria, exact agent prompts)
+given to the project owner for review; nothing implemented yet.
