@@ -147,3 +147,21 @@
   Telegram gate) remain fully designed in the M3 plan but NOT started —
   both require a separate, explicit LLM-provider/budget approval before
   any implementation. Approved by project owner.
+- 2026-08-21: Set a north-star architectural constraint for the
+  upcoming M4 "Agent Orchestration" milestone, ahead of any design work:
+  the orchestration core must not be built as a software-development-only
+  orchestrator. It must generalize to future business-agent workflows
+  (Opportunity/Market/Country/Customer/Competitor Research, Offer
+  Creation, Brand, Website, Creative Strategy, Creative Generation,
+  Advertising, Experimentation, Performance Analysis, Learning/
+  Optimization) without needing a redesign when those agents are added
+  later. Why: the long-term vision is a market/data -> discover ->
+  research -> select country+audience -> assess evidence -> select
+  opportunity -> build offer -> build website/creatives -> test -> measure
+  -> learn -> improve loop, where the human's role narrows to setting end
+  goals, giving key approvals, and judging end results — building M4
+  narrowly for code-agent orchestration now would force a rework later.
+  Recorded in `07 Agents/Orchestrator.md`. None of the business agents are
+  built yet; this is a constraint on M4's architecture, not new scope to
+  implement now — M4 implementation itself has still not started. Set by
+  project owner.
