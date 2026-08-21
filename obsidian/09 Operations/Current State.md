@@ -1,5 +1,87 @@
 # Current State
 
+## Milestone M4.1 — COMPLETE (2026-08-21)
+First slice of M4 "Agent Orchestration Layer" (see `07 Agents/Orchestrator.md`
+for the North-Star requirement this milestone was designed against). Goal:
+Task/TaskAttempt/TaskEvent persistence + a pure-Python task state machine —
+no worker execution, no LLM calls, no new provider. BUILDER/INTELLIGENCE/
+REVIEWER worked from LEAD's exact prompts (goal, transition spec, disjoint
+file scope) derived from the approved M4 architecture plan, same
+git-worktree pattern as M1-M3.1.
+
+**Integrated:**
+- `agent/builder` (`46227cf`): Alembic adopted (previously the app only
+  ever used `Base.metadata.create_all()`, never migrated) — a baseline
+  migration capturing the pre-M4.1 schema as-is, then a real migration
+  adding `Task`, `TaskAttempt`, `TaskEvent` and a nullable `task_id` FK on
+  the existing, previously-unused `Approval`/`CostEvent` tables.
+  `Task.role`/`Task.status` are plain strings, not imported from an
+  orchestration module — persistence stays agnostic of orchestration logic,
+  per the North-Star requirement.
+- `agent/intelligence` (`d41a167`): pure-Python `TaskState`
+  state machine (12 states, actor-gated transitions, dependency-readiness,
+  bounded retry, timeout detection) — zero SQLAlchemy/DB imports.
+- **LEAD pre-review correction** (`4f6896d`, before REVIEWER started):
+  compared the handoff against the approved plan's exact transition
+  spec and found 4 functional deviations (not style choices): a missing
+  `REVIEWING -> INTEGRATING` no-approval path (would have forced every
+  task through human approval regardless of policy), `INTEGRATING ->
+  FAILED` instead of the plan's `-> BLOCKED` (turned a mergeconflict into
+  an unrecoverable dead end), `APPROVAL_REQUIRED -> NEEDS_FIX` instead of
+  `-> FAILED` (a human rejection would have silently triggered another
+  automatic worker attempt), and a missing generic
+  "(elke actieve staat) -> BLOCKED" emergency-stop rule. All 4 corrected;
+  tests updated to match, 8 new tests added.
+- `agent/reviewer` (`ce5dc8a`): independent validation (own tests, own
+  fixtures, not reusing BUILDER/INTELLIGENCE's) — 45 new tests covering the
+  full state graph, actor enforcement, persistence cascade/SET NULL
+  behavior, the role-agnostic-string architectural boundary, and an
+  independent stamp-then-upgrade proof of the live-migration procedure's
+  core mechanic. Found 3 real issues LEAD's own review had missed:
+  - **Finding 1** (`RUNNING -> FAILED`): the approved plan's own transition
+    table names this edge for crash/timeout, but the plan's recovery-table
+    prose and bounded-fix-loop section both describe a crash as
+    retry-eligible. LEAD decision (`4f66985`): removed — crash/timeout now
+    routes through the existing `NEEDS_FIX` retry/block path like any other
+    failure, never a silent unconditional hard stop.
+  - **Finding 2** (generic BLOCKED excluded `NEEDS_FIX`/`INTEGRATING` for
+    HUMAN): LEAD's round-1 correction had left these two states
+    systeem-only, reasoning they had their own specific trigger — REVIEWER
+    correctly pointed out the plan's generic rule doesn't carve out that
+    exception. LEAD decision (`4f66985`): widened both to include HUMAN.
+  - **Finding 3** (live-Postgres deploy-order risk: `app.main`'s
+    `Base.metadata.create_all()` could race an un-migrated Alembic state if
+    the new API image started before migrations ran): resolved
+    procedurally (migrate via one-off `docker compose run` containers,
+    never the long-running `api` service, before recreating it) — while
+    executing that procedure, also found and fixed (`f9811e2`) that the
+    Dockerfile never copied `alembic.ini`/`alembic/` into the image at all,
+    which would have made the whole procedure impossible to run.
+- Full backend suite: **238 passed, 0 failed** (120 existing + 6 Alembic +
+  64 state-machine + 45 REVIEWER + 3 findings-fix regressions).
+
+**Live verification against the real Docker/PostgreSQL stack (2026-08-21):**
+Full backup taken first (`pg_dump`, kept outside the repo). Schema/data
+confirmed matching the baseline migration's expected pre-M4.1 state before
+touching anything (7 tables, same row counts as before: 22 opportunities,
+180 signals, 2 agent_runs, 20 evidence, 0 approvals, 0 cost_events, 0
+experiments). Procedure: rebuild `api` image -> `alembic current` (none) ->
+`alembic stamp da1e9c017859` (writes only `alembic_version`, verified no
+table touched) -> `alembic upgrade head` (adds `tasks`/`task_attempts`/
+`task_events` + the two nullable FK columns) -> verified `alembic current
+== 6b1c524e1012 (head)`, 11 tables total, `approvals.task_id`/
+`cost_events.task_id` present with correct FK -> only then recreated the
+long-running `api` container -> `GET /api/health` returned `{"status":
+"ok"}` -> `GET /api/opportunities` returned all 22 pre-existing
+opportunities unchanged via the live API. One benign surprise along the
+way: `docker compose run` unexpectedly recreated the `db` container once
+(container-only, not the volume) — caught immediately, row counts verified
+identical before and after, no data lost.
+
+No LLM/API calls anywhere in M4.1, no new paid provider, no worker
+execution — pure persistence + state-machine engine, exactly as scoped.
+M4.2 (a real, automatically-dispatched Claude Code worker) not started.
+
 ## Milestone M3.1 — COMPLETE (2026-08-20)
 Deterministic pre-ranking replaces the first-come-first-served volume
 cap; REVIEWER validated independently; verified live against the real

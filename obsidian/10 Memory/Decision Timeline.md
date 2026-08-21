@@ -165,3 +165,33 @@
   built yet; this is a constraint on M4's architecture, not new scope to
   implement now — M4 implementation itself has still not started. Set by
   project owner.
+- 2026-08-21: Full M4 architecture plan produced (23 sections: state
+  machine, worker contract, Claude Code headless-automation research,
+  OpenAI comparison research, provider strategy, DB impact, git/worktree
+  strategy, bounded fix-loop, approval policy, Telegram control plane,
+  observability, threat model, costs, M4.1-M4.6 roadmap with acceptance
+  criteria, dogfood test, risks, explicit non-scope) and approved by
+  project owner. Two decisions deliberately left open pending real
+  measurement rather than guessed: Claude subscription/OAuth-token vs.
+  metered API key for future workers, and Claude Agent SDK vs. CLI
+  subprocess. Approved by project owner.
+- 2026-08-21: Milestone M4.1 marked COMPLETE — Task/TaskAttempt/TaskEvent
+  persistence (Alembic adopted for the first time) + a pure-Python,
+  role-agnostic task state machine. Why complete: full suite green (238/238
+  after REVIEWER's 45 independent tests + 3 real findings), all 3 REVIEWER
+  findings explicitly decided and resolved using the approved M4 plan as
+  sole authority (no new architecture invented) — RUNNING -> FAILED
+  removed in favor of the plan's intended retry-first route,
+  NEEDS_FIX/INTEGRATING -> BLOCKED widened to include HUMAN per the plan's
+  generic active-state rule, and a Dockerfile gap (alembic.ini/alembic/
+  never copied into the image) found and fixed while executing the
+  deploy-order-safe live-migration procedure. Live Postgres taken from
+  pre-Alembic to migration head with a backup first, read-only drift-check
+  before stamping, and the long-running `api` container recreated only
+  after `alembic current == head` was confirmed — existing M1-M3.1 data
+  (22 opportunities, 180 signals, 2 agent_runs, 20 evidence) verified
+  byte-identical before/after via both `psql` and the live API, `/api/health`
+  green. Two LEAD correction rounds against the approved plan are logged in
+  detail in `09 Operations/Current State.md`. No LLM/API calls, no new
+  paid provider, no worker execution anywhere in M4.1. M4.2 (a real
+  dispatched worker) not started. Approved by project owner.
