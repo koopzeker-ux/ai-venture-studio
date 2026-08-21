@@ -106,6 +106,10 @@ class Approval(Base):
     risk_level: Mapped[int] = mapped_column(Integer, default=4)
     status: Mapped[ApprovalStatus] = mapped_column(Enum(ApprovalStatus), default=ApprovalStatus.pending)
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Nullable: most Approval rows so far are not task-scoped. Added for M4.1
+    # so an APPROVAL_REQUIRED task transition (see app.orchestration, added by
+    # INTELLIGENCE) can be traced back to the task that created it.
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -117,4 +121,96 @@ class CostEvent(Base):
     provider: Mapped[str | None] = mapped_column(String(100))
     amount_eur: Mapped[float] = mapped_column(Float)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Nullable for the same reason as Approval.task_id above.
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Task(Base):
+    """A unit of orchestrated work (M4.1).
+
+    Deliberately role-agnostic: `role` and `status` are plain strings, not
+    hardcoded to software-development concepts, so a future business-agent
+    task (research, offer, creative, ...) fits the same table without a
+    schema change. `status` is intentionally a plain string column here, not
+    a DB-level enum tied to app.orchestration.state_machine's TaskState --
+    that module (owned by INTELLIGENCE) may not exist yet in every worktree,
+    and persistence must not import orchestration logic. Wiring the two
+    together (validating status transitions before writing) is orchestrator
+    integration work, not part of this table's definition.
+    """
+
+    __tablename__ = "tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    goal: Mapped[str] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(String(120), index=True)
+    instructions: Mapped[str | None] = mapped_column(Text)
+    allowed_resources: Mapped[list] = mapped_column(JSON, default=list)
+    forbidden_actions: Mapped[list] = mapped_column(JSON, default=list)
+    acceptance_criteria: Mapped[str | None] = mapped_column(Text)
+    # List of Task.id values this task depends on. A simple JSON array, not a
+    # join table -- promote to one only if real fan-out/fan-in graphs show up
+    # in a later M4.x slice (CLAUDE.md SS15, no speculative abstraction).
+    depends_on: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(30), default="PLANNED", index=True)
+    timeout_seconds: Mapped[int | None] = mapped_column(Integer)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=2)
+    budget_eur: Mapped[float | None] = mapped_column(Float)
+    required_approvals: Mapped[list] = mapped_column(JSON, default=list)
+    provider: Mapped[str | None] = mapped_column(String(120))
+    model: Mapped[str | None] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TaskAttempt(Base):
+    """One bounded worker invocation for a Task (M4.1).
+
+    Distinct from AgentRun: AgentRun is a flat, unlinked log of completed
+    collector runs (M2/M3), with no attempt/retry concept or FK to a task.
+    TaskAttempt is what makes the bounded fix-loop (worker -> tests ->
+    reviewer -> fix, up to Task.max_attempts) representable at all.
+    """
+
+    __tablename__ = "task_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    provider: Mapped[str | None] = mapped_column(String(120))
+    model: Mapped[str | None] = mapped_column(String(120))
+    worktree_path: Mapped[str | None] = mapped_column(String(500))
+    branch: Mapped[str | None] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(30))
+    session_id: Mapped[str | None] = mapped_column(String(200))
+    summary: Mapped[str | None] = mapped_column(Text)
+    files_changed: Mapped[dict | None] = mapped_column(JSON)
+    tests_passed: Mapped[bool | None] = mapped_column(Boolean)
+    cost_eur: Mapped[float] = mapped_column(Float, default=0.0)
+    findings: Mapped[dict | None] = mapped_column(JSON)
+    blockers: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class TaskEvent(Base):
+    """Append-only state-transition / audit log for a Task (M4.1).
+
+    This is what makes crash recovery and observability possible: on
+    orchestrator restart, re-reading non-terminal Tasks plus their
+    TaskEvent history is enough to resume without guessing prior state.
+    Never updated or deleted, only inserted.
+    """
+
+    __tablename__ = "task_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    attempt_id: Mapped[int | None] = mapped_column(ForeignKey("task_attempts.id", ondelete="SET NULL"), index=True)
+    from_state: Mapped[str | None] = mapped_column(String(30))
+    to_state: Mapped[str] = mapped_column(String(30))
+    actor: Mapped[str] = mapped_column(String(100))
+    detail: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
