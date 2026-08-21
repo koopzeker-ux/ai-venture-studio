@@ -93,6 +93,34 @@ def test_integrating_can_no_longer_reach_failed_directly():
         assert not is_valid_transition(TaskState.INTEGRATING, TaskState.FAILED, actor)
 
 
+def test_running_can_no_longer_reach_failed_directly():
+    """LEAD REVIEWER-driven correction, round 2: RUNNING -> FAILED (direct,
+    unconditioned) is removed -- crash/timeout now routes through NEEDS_FIX
+    like any other failure, so it gets the same bounded retry/block
+    treatment instead of an unconditional hard stop. See the round-2
+    TRANSITIONS comment in state_machine.py for the full reasoning."""
+    for actor in Actor:
+        assert not is_valid_transition(TaskState.RUNNING, TaskState.FAILED, actor)
+
+
+def test_running_crash_or_timeout_still_reaches_needs_fix_then_the_normal_retry_route():
+    """A RUNNING task that fails now only has NEEDS_FIX (WORKER/SYSTEM) or
+    the generic BLOCKED (ORCHESTRATOR/SYSTEM/HUMAN) as its failure exits --
+    NEEDS_FIX then resolves through the existing, already-tested bounded
+    retry/block logic (see test_state_machine_check_timeout_transitions_running_to_needs_fix
+    and the retry-logic tests above)."""
+    m = TaskStateMachine(timeout_seconds=60, max_attempts=1)
+    m.advance_ready([])
+    m.start_running(now=T0, actor=Actor.ORCHESTRATOR)
+    assert m.check_timeout(now=T0 + timedelta(seconds=61)) is True
+    assert m.state == TaskState.NEEDS_FIX
+
+    # attempts exhausted (max_attempts=1) -> resolves to BLOCKED, not FAILED
+    next_state = m.resolve_needs_fix()
+    assert next_state == TaskState.BLOCKED
+    assert not m.is_terminal()
+
+
 def test_approval_rejection_goes_to_failed_not_needs_fix():
     """LEAD pre-review correction: a human rejecting a task must stop it
     (FAILED, terminal), not silently trigger another automatic worker
@@ -115,15 +143,17 @@ def test_approval_required_can_no_longer_reach_needs_fix():
     [
         TaskState.PLANNED, TaskState.READY, TaskState.RUNNING, TaskState.TESTING,
         TaskState.REVIEW_PENDING, TaskState.REVIEWING, TaskState.APPROVAL_REQUIRED,
+        TaskState.NEEDS_FIX, TaskState.INTEGRATING,
     ],
 )
 def test_any_active_state_can_be_blocked_by_system_or_human(state):
     """The approved plan's generic '(elke actieve staat) -> BLOCKED' rule
-    (unrecoverable error, stale worktree, or an explicit human PAUSE) --
-    spot-checked across every active state that doesn't already have its own
-    specific, narrower ->BLOCKED edge (NEEDS_FIX and INTEGRATING have their
-    own systeem-only ->BLOCKED edges for a specific documented trigger, see
-    the other tests above/below, not this generic one)."""
+    (unrecoverable error, stale worktree, or an explicit human PAUSE),
+    spot-checked across every one of the 9 active states -- including
+    NEEDS_FIX and INTEGRATING (LEAD REVIEWER-driven correction, round 2:
+    these two also have their own narrower systeem-only ->BLOCKED trigger
+    for a specific documented reason, but that doesn't exempt them from the
+    generic rule too -- the actor set is the union of both)."""
     assert is_valid_transition(state, TaskState.BLOCKED, Actor.ORCHESTRATOR)
     assert is_valid_transition(state, TaskState.BLOCKED, Actor.SYSTEM)
     assert is_valid_transition(state, TaskState.BLOCKED, Actor.HUMAN)
@@ -306,11 +336,29 @@ def test_resolve_needs_fix_respects_actor_control_on_retry():
         m.resolve_needs_fix(actor=Actor.WORKER)  # only ORCHESTRATOR may resolve retries
 
 
-def test_resolve_needs_fix_respects_actor_control_on_block():
+def test_resolve_needs_fix_allows_human_when_the_result_is_blocked():
+    """LEAD REVIEWER-driven correction (round 2): NEEDS_FIX -> BLOCKED is now
+    widened to include HUMAN (the approved plan's generic active-state ->
+    BLOCKED rule applies here too, alongside the systeem-only
+    attempts-exhausted trigger). When attempts are exhausted,
+    resolve_needs_fix() computes BLOCKED regardless of who called it, and a
+    HUMAN-attributed call now succeeds like an ORCHESTRATOR/SYSTEM one --
+    this was previously (incorrectly) rejected."""
     m = TaskStateMachine(max_attempts=1)
     m.state = TaskState.NEEDS_FIX
     m.attempt_number = 1
-    # HUMAN is not permitted to drive NEEDS_FIX -> BLOCKED
+    next_state = m.resolve_needs_fix(actor=Actor.HUMAN)
+    assert next_state == TaskState.BLOCKED
+    assert m.state == TaskState.BLOCKED
+
+
+def test_resolve_needs_fix_still_denies_human_when_the_result_would_be_running():
+    """HUMAN is still not permitted to drive the *retry* path (NEEDS_FIX ->
+    RUNNING is ORCHESTRATOR-only, unchanged) -- only the BLOCKED outcome was
+    widened, not retry dispatch."""
+    m = TaskStateMachine(max_attempts=5)
+    m.state = TaskState.NEEDS_FIX
+    m.attempt_number = 0  # budget remains -> would resolve to RUNNING
     with pytest.raises(InvalidTransitionError):
         m.resolve_needs_fix(actor=Actor.HUMAN)
 

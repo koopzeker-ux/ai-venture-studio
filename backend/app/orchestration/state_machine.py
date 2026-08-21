@@ -97,6 +97,34 @@ class InvalidTransitionError(Exception):
 # TESTING rather than a generic "systeem" actor) were left as INTELLIGENCE
 # designed them -- richer actor attribution for the audit trail, and not a
 # functional gap against the plan, so not "corrected".
+#
+# LEAD REVIEWER-driven correction (2026-08-21, round 2): REVIEWER's
+# independent validation raised two further findings against the approved
+# plan, both resolved here:
+#
+# 1. RUNNING -> FAILED (direct, ORCHESTRATOR-only) is REMOVED. The approved
+#    plan's own SS4 table names this edge for "crash/timeout", but the same
+#    plan's SS11 recovery table and SS9 bounded-fix-loop section both
+#    describe a worker crash as retry-eligible ("Worker crash ->
+#    heartbeat/timeout-detectie -> NEEDS_FIX, nieuwe attempt"), and the
+#    entire point of the bounded fix-loop is to avoid a hard stop on a
+#    possibly-transient failure. Read as a whole, the plan's intent is that
+#    crash/timeout feeds the *same* retry/fix/block route as any other
+#    failure -- RUNNING -> NEEDS_FIX (already correctly wired for timeout
+#    detection via `TaskStateMachine.check_timeout()`) -> either RUNNING
+#    again (retry budget remains) or BLOCKED (exhausted). A truly
+#    unrecoverable RUNNING failure still reaches BLOCKED via the generic
+#    active-state rule below, never a silent, unconditional FAILED.
+# 2. NEEDS_FIX -> BLOCKED and INTEGRATING -> BLOCKED are widened to include
+#    Actor.HUMAN. These two edges have their own plan-specific systeem-only
+#    trigger ("attempts op" / "conflict/regressiefout"), which is why the
+#    first correction above deliberately left HUMAN out of them -- but
+#    NEEDS_FIX and INTEGRATING are still *active states*, and the approved
+#    plan's generic rule ("elke actieve staat -> BLOCKED | ... | systeem OF
+#    mens") does not carve out an exception for states that also happen to
+#    have their own narrower automatic trigger. The systeem-only trigger and
+#    the human-pause trigger both target the same (from, to) edge, so the
+#    actor set is their union, not either one alone.
 TRANSITIONS: Mapping[TaskState, Mapping[TaskState, frozenset[Actor]]] = {
     TaskState.PLANNED: {
         TaskState.READY: frozenset({Actor.ORCHESTRATOR}),
@@ -109,7 +137,9 @@ TRANSITIONS: Mapping[TaskState, Mapping[TaskState, frozenset[Actor]]] = {
     TaskState.RUNNING: {
         TaskState.TESTING: frozenset({Actor.WORKER}),
         TaskState.NEEDS_FIX: frozenset({Actor.WORKER, Actor.SYSTEM}),
-        TaskState.FAILED: frozenset({Actor.ORCHESTRATOR}),
+        # REMOVED (round 2): no more direct, unconditioned RUNNING -> FAILED.
+        # Crash/timeout now routes through NEEDS_FIX like any other failure
+        # -- see the round-2 comment above.
         TaskState.BLOCKED: frozenset({Actor.ORCHESTRATOR, Actor.SYSTEM, Actor.HUMAN}),
     },
     TaskState.TESTING: {
@@ -148,12 +178,16 @@ TRANSITIONS: Mapping[TaskState, Mapping[TaskState, frozenset[Actor]]] = {
         # approved plan (SS11, recovery table) treats a merge conflict or
         # post-merge regression failure as BLOCKED -- human-recoverable,
         # requeueable -- not a dead end. FAILED is no longer reachable from
-        # INTEGRATING at all.
-        TaskState.BLOCKED: frozenset({Actor.ORCHESTRATOR, Actor.SYSTEM}),
+        # INTEGRATING at all. WIDENED (round 2): HUMAN added alongside the
+        # systeem-only conflict/regression trigger -- see the round-2
+        # comment above.
+        TaskState.BLOCKED: frozenset({Actor.ORCHESTRATOR, Actor.SYSTEM, Actor.HUMAN}),
     },
     TaskState.NEEDS_FIX: {
         TaskState.RUNNING: frozenset({Actor.ORCHESTRATOR}),
-        TaskState.BLOCKED: frozenset({Actor.ORCHESTRATOR, Actor.SYSTEM}),
+        # WIDENED (round 2): HUMAN added alongside the systeem-only
+        # attempts-exhausted trigger -- see the round-2 comment above.
+        TaskState.BLOCKED: frozenset({Actor.ORCHESTRATOR, Actor.SYSTEM, Actor.HUMAN}),
     },
     TaskState.BLOCKED: {
         TaskState.READY: frozenset({Actor.HUMAN}),

@@ -117,16 +117,15 @@ def test_integrating_never_reaches_terminal_failed_directly():
         assert not is_valid_transition(TaskState.INTEGRATING, TaskState.FAILED, actor)
 
 
-def test_integrating_blocked_edge_excludes_human_actor():
-    """Documented, deliberate asymmetry (see state_machine.py's TRANSITIONS
-    comment and the builder's own test_any_active_state_can_be_blocked_by_system_or_human,
-    which explicitly excludes INTEGRATING/NEEDS_FIX from its parametrization):
-    unlike every other active state, a HUMAN cannot directly force
-    INTEGRATING -> BLOCKED. Recorded here as a characterization test, not an
-    endorsement -- flagged separately in the review report as a question for
-    LEAD: does the approved "elke actieve staat -> BLOCKED" emergency-stop
-    rule intend for HUMAN to be excluded here, or is this an oversight?"""
-    assert not is_valid_transition(TaskState.INTEGRATING, TaskState.BLOCKED, Actor.HUMAN)
+def test_integrating_blocked_edge_now_includes_human_actor():
+    """RESOLVED by LEAD (round 2, post-review): this was flagged as an
+    open question (was: test_integrating_blocked_edge_excludes_human_actor)
+    -- does the approved 'elke actieve staat -> BLOCKED' emergency-stop rule
+    intend HUMAN to be excluded here, given INTEGRATING already had its own
+    narrower systeem-only ->BLOCKED trigger? LEAD's decision: no exclusion
+    intended -- the generic rule and the specific trigger target the same
+    edge, so the actor set is their union. HUMAN added."""
+    assert is_valid_transition(TaskState.INTEGRATING, TaskState.BLOCKED, Actor.HUMAN)
     assert is_valid_transition(TaskState.INTEGRATING, TaskState.BLOCKED, Actor.ORCHESTRATOR)
     assert is_valid_transition(TaskState.INTEGRATING, TaskState.BLOCKED, Actor.SYSTEM)
 
@@ -144,9 +143,10 @@ def test_needs_fix_retry_exhaustion_goes_to_blocked_not_failed():
     assert not m.is_terminal()
 
 
-def test_needs_fix_blocked_edge_excludes_human_actor_too():
-    """Same asymmetry as INTEGRATING -- see test_integrating_blocked_edge_excludes_human_actor."""
-    assert not is_valid_transition(TaskState.NEEDS_FIX, TaskState.BLOCKED, Actor.HUMAN)
+def test_needs_fix_blocked_edge_now_includes_human_actor_too():
+    """RESOLVED by LEAD (round 2, post-review) -- same resolution as
+    test_integrating_blocked_edge_now_includes_human_actor."""
+    assert is_valid_transition(TaskState.NEEDS_FIX, TaskState.BLOCKED, Actor.HUMAN)
 
 
 def test_needs_fix_with_budget_remaining_retries_into_running():
