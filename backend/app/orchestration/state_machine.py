@@ -1,0 +1,252 @@
+"""M4.1 orchestration state machine.
+
+Pure Python, deterministic, no database, no SQLAlchemy, no I/O. This module
+owns the *rules* of task orchestration (legal state transitions, actor
+control, dependency-readiness, retry/backoff, timeout detection) so that a
+future persistence layer (Task/TaskAttempt/TaskEvent, see
+``app.models.entities``) can validate state changes before writing them,
+without this module ever importing the database.
+
+Deliberately role-agnostic: nothing here is specific to software-development
+tasks. A future business-agent task (research, offer, creative, ...) drives
+the same state graph.
+"""
+
+from __future__ import annotations
+
+import enum
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Iterable, Mapping
+
+
+class TaskState(str, enum.Enum):
+    """Lifecycle states of an orchestrated Task."""
+
+    PLANNED = "PLANNED"
+    READY = "READY"
+    RUNNING = "RUNNING"
+    TESTING = "TESTING"
+    REVIEW_PENDING = "REVIEW_PENDING"
+    REVIEWING = "REVIEWING"
+    NEEDS_FIX = "NEEDS_FIX"
+    APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
+    INTEGRATING = "INTEGRATING"
+    DONE = "DONE"
+    FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
+
+
+TERMINAL_STATES = frozenset({TaskState.DONE, TaskState.FAILED})
+
+
+class Actor(str, enum.Enum):
+    """Who is allowed to drive a given state transition.
+
+    SYSTEM is the automated clock/dependency-graph checker (timeouts,
+    dependency-readiness) -- it is not an LLM call and performs no I/O; it
+    is the actor value used when the orchestrator loop itself detects a
+    condition (elapsed time, dependency graph) rather than a human or agent
+    reporting an outcome.
+    """
+
+    ORCHESTRATOR = "orchestrator"
+    WORKER = "worker"
+    REVIEWER = "reviewer"
+    HUMAN = "human"
+    SYSTEM = "system"
+
+
+class InvalidTransitionError(Exception):
+    """Raised when a state transition is not legal for the given actor."""
+
+    def __init__(self, from_state: TaskState, to_state: TaskState, actor: Actor):
+        self.from_state = from_state
+        self.to_state = to_state
+        self.actor = actor
+        super().__init__(
+            f"Illegal transition {from_state.value} -> {to_state.value} for actor {actor.value}"
+        )
+
+
+# Transition table: from_state -> to_state -> actors allowed to perform it.
+#
+# PLANNED -> READY is gated additionally by dependency-readiness (see
+# `dependencies_satisfied` / `TaskStateMachine.advance_ready`) on top of the
+# actor check below.
+#
+# NEEDS_FIX -> RUNNING is gated additionally by retry budget (see
+# `can_retry` / `TaskStateMachine.resolve_needs_fix`).
+TRANSITIONS: Mapping[TaskState, Mapping[TaskState, frozenset[Actor]]] = {
+    TaskState.PLANNED: {
+        TaskState.READY: frozenset({Actor.ORCHESTRATOR}),
+    },
+    TaskState.READY: {
+        TaskState.RUNNING: frozenset({Actor.ORCHESTRATOR}),
+    },
+    TaskState.RUNNING: {
+        TaskState.TESTING: frozenset({Actor.WORKER}),
+        TaskState.NEEDS_FIX: frozenset({Actor.WORKER, Actor.SYSTEM}),
+        TaskState.FAILED: frozenset({Actor.ORCHESTRATOR}),
+    },
+    TaskState.TESTING: {
+        TaskState.REVIEW_PENDING: frozenset({Actor.ORCHESTRATOR}),
+        TaskState.NEEDS_FIX: frozenset({Actor.ORCHESTRATOR}),
+    },
+    TaskState.REVIEW_PENDING: {
+        TaskState.REVIEWING: frozenset({Actor.REVIEWER}),
+    },
+    TaskState.REVIEWING: {
+        TaskState.APPROVAL_REQUIRED: frozenset({Actor.REVIEWER}),
+        TaskState.NEEDS_FIX: frozenset({Actor.REVIEWER}),
+    },
+    TaskState.APPROVAL_REQUIRED: {
+        TaskState.INTEGRATING: frozenset({Actor.HUMAN}),
+        TaskState.NEEDS_FIX: frozenset({Actor.HUMAN}),
+    },
+    TaskState.INTEGRATING: {
+        TaskState.DONE: frozenset({Actor.ORCHESTRATOR}),
+        TaskState.FAILED: frozenset({Actor.ORCHESTRATOR}),
+    },
+    TaskState.NEEDS_FIX: {
+        TaskState.RUNNING: frozenset({Actor.ORCHESTRATOR}),
+        TaskState.BLOCKED: frozenset({Actor.ORCHESTRATOR, Actor.SYSTEM}),
+    },
+    TaskState.BLOCKED: {
+        TaskState.READY: frozenset({Actor.HUMAN}),
+        TaskState.PLANNED: frozenset({Actor.HUMAN}),
+    },
+    TaskState.DONE: {},
+    TaskState.FAILED: {},
+}
+
+
+def is_valid_transition(from_state: TaskState, to_state: TaskState, actor: Actor) -> bool:
+    """Whether `actor` is allowed to move a task from `from_state` to `to_state`.
+
+    This checks only the actor/transition table -- it does not evaluate the
+    extra guards (dependency-readiness, retry budget) that gate
+    PLANNED -> READY and NEEDS_FIX -> RUNNING; use `TaskStateMachine` or the
+    dedicated guard functions for those.
+    """
+    allowed_actors = TRANSITIONS.get(from_state, {}).get(to_state)
+    return allowed_actors is not None and actor in allowed_actors
+
+
+def validate_transition(from_state: TaskState, to_state: TaskState, actor: Actor) -> None:
+    """Raise InvalidTransitionError if the transition is not legal."""
+    if not is_valid_transition(from_state, to_state, actor):
+        raise InvalidTransitionError(from_state, to_state, actor)
+
+
+def dependencies_satisfied(dependency_states: Iterable[TaskState]) -> bool:
+    """A task's dependencies are satisfied once every one of them is DONE.
+
+    A task with no dependencies is trivially satisfied.
+    """
+    return all(state == TaskState.DONE for state in dependency_states)
+
+
+def can_retry(attempt_number: int, max_attempts: int) -> bool:
+    """Whether another attempt is allowed given attempts already made."""
+    return attempt_number < max_attempts
+
+
+def resolve_after_needs_fix(attempt_number: int, max_attempts: int) -> TaskState:
+    """Where a NEEDS_FIX task goes next: RUNNING (retry) or BLOCKED (exhausted)."""
+    return TaskState.RUNNING if can_retry(attempt_number, max_attempts) else TaskState.BLOCKED
+
+
+def is_running_timed_out(started_at: datetime | None, timeout_seconds: int | None, now: datetime) -> bool:
+    """Whether a RUNNING attempt has exceeded its timeout, as of `now`.
+
+    `now` is always supplied by the caller (never read from a system clock
+    here) so this stays deterministic and I/O-free. A task with no timeout
+    configured (`timeout_seconds` is None) or that hasn't started yet
+    (`started_at` is None) never times out.
+    """
+    if timeout_seconds is None or started_at is None:
+        return False
+    return (now - started_at).total_seconds() >= timeout_seconds
+
+
+@dataclass
+class TaskStateMachine:
+    """Convenience wrapper composing the guard functions above around one task's state.
+
+    Holds only the fields the guards need (state, attempt bookkeeping,
+    timeout bookkeeping) -- no persistence, no task metadata beyond that.
+    Every transition still goes through `validate_transition`, so calling
+    `apply()` directly with an illegal transition still raises.
+    """
+
+    state: TaskState = TaskState.PLANNED
+    attempt_number: int = 0
+    max_attempts: int = 2
+    timeout_seconds: int | None = None
+    started_at: datetime | None = None
+    history: list[tuple[TaskState, TaskState, Actor]] = field(default_factory=list)
+
+    def apply(self, to_state: TaskState, actor: Actor) -> TaskState:
+        """Move to `to_state` if `actor` is allowed to from the current state.
+
+        Plain actor/transition-table check only -- no dependency or retry
+        guard. Use `advance_ready` / `resolve_needs_fix` for those.
+        """
+        validate_transition(self.state, to_state, actor)
+        self.history.append((self.state, to_state, actor))
+        self.state = to_state
+        return self.state
+
+    def advance_ready(self, dependency_states: Iterable[TaskState], actor: Actor = Actor.ORCHESTRATOR) -> bool:
+        """Try PLANNED -> READY. Returns True if it happened, False if dependencies aren't ready yet.
+
+        Raises InvalidTransitionError if the actor/transition itself is illegal
+        (e.g. called from a state other than PLANNED) regardless of dependency status.
+        """
+        validate_transition(self.state, TaskState.READY, actor)
+        if not dependencies_satisfied(dependency_states):
+            return False
+        self.history.append((self.state, TaskState.READY, actor))
+        self.state = TaskState.READY
+        return True
+
+    def start_running(self, now: datetime, actor: Actor = Actor.ORCHESTRATOR) -> TaskState:
+        """READY -> RUNNING, recording the attempt start time for timeout tracking."""
+        self.apply(TaskState.RUNNING, actor)
+        self.attempt_number += 1
+        self.started_at = now
+        return self.state
+
+    def resolve_needs_fix(self, actor: Actor = Actor.ORCHESTRATOR) -> TaskState:
+        """From NEEDS_FIX, move to RUNNING if retries remain, else BLOCKED.
+
+        Does not itself bump attempt_number or started_at when retrying --
+        call `start_running` for that once the new attempt actually begins.
+        """
+        next_state = resolve_after_needs_fix(self.attempt_number, self.max_attempts)
+        if next_state == TaskState.BLOCKED:
+            actors_allowed = TRANSITIONS[TaskState.NEEDS_FIX][TaskState.BLOCKED]
+            if actor not in actors_allowed:
+                raise InvalidTransitionError(TaskState.NEEDS_FIX, TaskState.BLOCKED, actor)
+        else:
+            validate_transition(TaskState.NEEDS_FIX, next_state, actor)
+        self.history.append((self.state, next_state, actor))
+        self.state = next_state
+        return self.state
+
+    def check_timeout(self, now: datetime, actor: Actor = Actor.SYSTEM) -> bool:
+        """If RUNNING and the attempt has timed out, transition to NEEDS_FIX.
+
+        Returns True if a timeout transition happened, False otherwise
+        (including when the task isn't RUNNING at all).
+        """
+        if self.state != TaskState.RUNNING:
+            return False
+        if not is_running_timed_out(self.started_at, self.timeout_seconds, now):
+            return False
+        self.apply(TaskState.NEEDS_FIX, actor)
+        return True
+
+    def is_terminal(self) -> bool:
+        return self.state in TERMINAL_STATES
