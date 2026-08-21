@@ -77,36 +77,79 @@ class InvalidTransitionError(Exception):
 #
 # NEEDS_FIX -> RUNNING is gated additionally by retry budget (see
 # `can_retry` / `TaskStateMachine.resolve_needs_fix`).
+#
+# LEAD pre-review correction (2026-08-21): every non-terminal state below
+# carries a "-> BLOCKED" edge -- the approved M4 plan's generic
+# "(elke actieve staat) -> BLOCKED" rule (unrecoverable error, stale
+# worktree, or an explicit human PAUSE). The first BUILDER/INTELLIGENCE
+# handoff only had this for NEEDS_FIX, and had three edges that disagreed
+# with the approved transition spec: REVIEWING had no path straight to
+# INTEGRATING (so every reviewed task was forced through human approval,
+# even when policy didn't require it), INTEGRATING routed a merge
+# conflict/regression failure to the terminal FAILED state instead of the
+# recoverable BLOCKED state, and APPROVAL_REQUIRED routed a human rejection
+# into NEEDS_FIX (silently auto-retrying work a human had just said no to)
+# instead of FAILED. BLOCKED -> PLANNED was also dropped in favor of the
+# plan's literal "BLOCKED -> READY of RUNNING" pair. See the corrected
+# transitions marked below; see the docstring reasoning in each removed
+# edge's place for why it was judged a bug rather than a valid
+# interpretation. Actor choices below (e.g. WORKER driving RUNNING ->
+# TESTING rather than a generic "systeem" actor) were left as INTELLIGENCE
+# designed them -- richer actor attribution for the audit trail, and not a
+# functional gap against the plan, so not "corrected".
 TRANSITIONS: Mapping[TaskState, Mapping[TaskState, frozenset[Actor]]] = {
     TaskState.PLANNED: {
         TaskState.READY: frozenset({Actor.ORCHESTRATOR}),
+        TaskState.BLOCKED: frozenset({Actor.ORCHESTRATOR, Actor.SYSTEM, Actor.HUMAN}),
     },
     TaskState.READY: {
         TaskState.RUNNING: frozenset({Actor.ORCHESTRATOR}),
+        TaskState.BLOCKED: frozenset({Actor.ORCHESTRATOR, Actor.SYSTEM, Actor.HUMAN}),
     },
     TaskState.RUNNING: {
         TaskState.TESTING: frozenset({Actor.WORKER}),
         TaskState.NEEDS_FIX: frozenset({Actor.WORKER, Actor.SYSTEM}),
         TaskState.FAILED: frozenset({Actor.ORCHESTRATOR}),
+        TaskState.BLOCKED: frozenset({Actor.ORCHESTRATOR, Actor.SYSTEM, Actor.HUMAN}),
     },
     TaskState.TESTING: {
         TaskState.REVIEW_PENDING: frozenset({Actor.ORCHESTRATOR}),
         TaskState.NEEDS_FIX: frozenset({Actor.ORCHESTRATOR}),
+        TaskState.BLOCKED: frozenset({Actor.ORCHESTRATOR, Actor.SYSTEM, Actor.HUMAN}),
     },
     TaskState.REVIEW_PENDING: {
         TaskState.REVIEWING: frozenset({Actor.REVIEWER}),
+        TaskState.BLOCKED: frozenset({Actor.ORCHESTRATOR, Actor.SYSTEM, Actor.HUMAN}),
     },
     TaskState.REVIEWING: {
         TaskState.APPROVAL_REQUIRED: frozenset({Actor.REVIEWER}),
+        # CORRECTED: missing from the original handoff. The approved plan
+        # (SS4/SS13) makes REVIEWING -> APPROVAL_REQUIRED vs. -> INTEGRATING
+        # a *policy* decision (does this task's required_approvals list
+        # demand a human?), not something that only ever goes one way --
+        # without this edge, no task could ever integrate without a human,
+        # regardless of policy.
+        TaskState.INTEGRATING: frozenset({Actor.REVIEWER}),
         TaskState.NEEDS_FIX: frozenset({Actor.REVIEWER}),
+        TaskState.BLOCKED: frozenset({Actor.ORCHESTRATOR, Actor.SYSTEM, Actor.HUMAN}),
     },
     TaskState.APPROVAL_REQUIRED: {
         TaskState.INTEGRATING: frozenset({Actor.HUMAN}),
-        TaskState.NEEDS_FIX: frozenset({Actor.HUMAN}),
+        # CORRECTED: was NEEDS_FIX in the original handoff, which meant a
+        # human's rejection silently triggered another automatic worker
+        # attempt instead of stopping the task. The approved plan's
+        # transition spec is explicit: rejection -> FAILED (terminal).
+        TaskState.FAILED: frozenset({Actor.HUMAN}),
+        TaskState.BLOCKED: frozenset({Actor.ORCHESTRATOR, Actor.SYSTEM, Actor.HUMAN}),
     },
     TaskState.INTEGRATING: {
         TaskState.DONE: frozenset({Actor.ORCHESTRATOR}),
-        TaskState.FAILED: frozenset({Actor.ORCHESTRATOR}),
+        # CORRECTED: was FAILED (terminal) in the original handoff. The
+        # approved plan (SS11, recovery table) treats a merge conflict or
+        # post-merge regression failure as BLOCKED -- human-recoverable,
+        # requeueable -- not a dead end. FAILED is no longer reachable from
+        # INTEGRATING at all.
+        TaskState.BLOCKED: frozenset({Actor.ORCHESTRATOR, Actor.SYSTEM}),
     },
     TaskState.NEEDS_FIX: {
         TaskState.RUNNING: frozenset({Actor.ORCHESTRATOR}),
@@ -114,7 +157,11 @@ TRANSITIONS: Mapping[TaskState, Mapping[TaskState, frozenset[Actor]]] = {
     },
     TaskState.BLOCKED: {
         TaskState.READY: frozenset({Actor.HUMAN}),
-        TaskState.PLANNED: frozenset({Actor.HUMAN}),
+        # CORRECTED: was PLANNED in the original handoff. The approved plan
+        # says "BLOCKED -> READY of RUNNING" -- a human either requeues for
+        # full re-planning (READY) or resumes execution directly (RUNNING).
+        # PLANNED was not part of the approved contract.
+        TaskState.RUNNING: frozenset({Actor.HUMAN}),
     },
     TaskState.DONE: {},
     TaskState.FAILED: {},

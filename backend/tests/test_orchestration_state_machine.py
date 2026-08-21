@@ -65,12 +65,76 @@ def test_happy_path_full_lifecycle_to_done():
     ]
 
 
-def test_happy_path_integrating_can_fail():
+def test_happy_path_reviewer_can_integrate_directly_without_approval():
+    """REVIEWING -> INTEGRATING: the plan makes this a policy decision (does
+    this task's required_approvals list demand a human?), not something
+    every task must go through APPROVAL_REQUIRED for."""
+    m = TaskStateMachine()
+    m.state = TaskState.REVIEWING
+    m.apply(TaskState.INTEGRATING, Actor.REVIEWER)
+    assert m.state == TaskState.INTEGRATING
+    assert not m.is_terminal()
+
+
+def test_integrating_can_be_blocked_by_conflict_or_regression_failure():
+    """LEAD pre-review correction: a merge conflict or post-merge regression
+    failure is BLOCKED (human-recoverable, requeueable), not FAILED
+    (terminal) -- see the approved plan's git/worktree recovery table."""
     m = TaskStateMachine()
     m.state = TaskState.INTEGRATING
-    m.apply(TaskState.FAILED, Actor.ORCHESTRATOR)
+    m.apply(TaskState.BLOCKED, Actor.ORCHESTRATOR)
+    assert m.state == TaskState.BLOCKED
+    assert not m.is_terminal()
+
+
+def test_integrating_can_no_longer_reach_failed_directly():
+    """Regression guard for the LEAD pre-review correction above."""
+    for actor in Actor:
+        assert not is_valid_transition(TaskState.INTEGRATING, TaskState.FAILED, actor)
+
+
+def test_approval_rejection_goes_to_failed_not_needs_fix():
+    """LEAD pre-review correction: a human rejecting a task must stop it
+    (FAILED, terminal), not silently trigger another automatic worker
+    attempt (NEEDS_FIX) -- see the approved transition spec."""
+    m = TaskStateMachine()
+    m.state = TaskState.APPROVAL_REQUIRED
+    m.apply(TaskState.FAILED, Actor.HUMAN)
     assert m.state == TaskState.FAILED
     assert m.is_terminal()
+
+
+def test_approval_required_can_no_longer_reach_needs_fix():
+    """Regression guard for the LEAD pre-review correction above."""
+    for actor in Actor:
+        assert not is_valid_transition(TaskState.APPROVAL_REQUIRED, TaskState.NEEDS_FIX, actor)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        TaskState.PLANNED, TaskState.READY, TaskState.RUNNING, TaskState.TESTING,
+        TaskState.REVIEW_PENDING, TaskState.REVIEWING, TaskState.APPROVAL_REQUIRED,
+    ],
+)
+def test_any_active_state_can_be_blocked_by_system_or_human(state):
+    """The approved plan's generic '(elke actieve staat) -> BLOCKED' rule
+    (unrecoverable error, stale worktree, or an explicit human PAUSE) --
+    spot-checked across every active state that doesn't already have its own
+    specific, narrower ->BLOCKED edge (NEEDS_FIX and INTEGRATING have their
+    own systeem-only ->BLOCKED edges for a specific documented trigger, see
+    the other tests above/below, not this generic one)."""
+    assert is_valid_transition(state, TaskState.BLOCKED, Actor.ORCHESTRATOR)
+    assert is_valid_transition(state, TaskState.BLOCKED, Actor.SYSTEM)
+    assert is_valid_transition(state, TaskState.BLOCKED, Actor.HUMAN)
+
+
+def test_done_and_failed_stay_unreachable_via_the_generic_blocked_rule():
+    """Terminal states never gain a ->BLOCKED edge -- they have no outgoing
+    transitions at all (see test_terminal_states_have_no_outgoing_transitions)."""
+    for actor in Actor:
+        assert not is_valid_transition(TaskState.DONE, TaskState.BLOCKED, actor)
+        assert not is_valid_transition(TaskState.FAILED, TaskState.BLOCKED, actor)
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +154,9 @@ def test_happy_path_integrating_can_fail():
         (TaskState.APPROVAL_REQUIRED, TaskState.DONE),
         (TaskState.DONE, TaskState.RUNNING),
         (TaskState.FAILED, TaskState.RUNNING),
-        (TaskState.BLOCKED, TaskState.RUNNING),
+        # BLOCKED -> RUNNING is NOT in this list: it's legal for HUMAN as of
+        # the LEAD pre-review correction (see test_blocked_recovers_to_running_via_human
+        # and test_blocked_cannot_be_recovered_by_non_human_actors below).
     ],
 )
 def test_illegal_transitions_rejected_for_any_actor(from_state, to_state):
@@ -356,17 +422,28 @@ def test_blocked_recovers_to_ready_via_human():
     assert m.state == TaskState.READY
 
 
-def test_blocked_recovers_to_planned_via_human():
+def test_blocked_recovers_to_running_via_human():
+    """LEAD pre-review correction: the approved plan is explicit --
+    'BLOCKED -> READY of RUNNING' -- a human can requeue for full
+    re-planning (READY, above) or resume execution directly (RUNNING).
+    BLOCKED -> PLANNED was not part of the approved contract and has been
+    removed (see test_blocked_cannot_reach_planned_anymore)."""
     m = TaskStateMachine()
     m.state = TaskState.BLOCKED
-    m.apply(TaskState.PLANNED, Actor.HUMAN)
-    assert m.state == TaskState.PLANNED
+    m.apply(TaskState.RUNNING, Actor.HUMAN)
+    assert m.state == TaskState.RUNNING
+
+
+def test_blocked_cannot_reach_planned_anymore():
+    """Regression guard for the LEAD pre-review correction above."""
+    for actor in Actor:
+        assert not is_valid_transition(TaskState.BLOCKED, TaskState.PLANNED, actor)
 
 
 def test_blocked_cannot_be_recovered_by_non_human_actors():
     for actor in (Actor.ORCHESTRATOR, Actor.WORKER, Actor.REVIEWER, Actor.SYSTEM):
         assert not is_valid_transition(TaskState.BLOCKED, TaskState.READY, actor)
-        assert not is_valid_transition(TaskState.BLOCKED, TaskState.PLANNED, actor)
+        assert not is_valid_transition(TaskState.BLOCKED, TaskState.RUNNING, actor)
 
 
 def test_blocked_task_can_run_full_retry_cycle_again_after_recovery():
