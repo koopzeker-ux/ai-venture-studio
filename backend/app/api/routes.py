@@ -1,10 +1,13 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.models.entities import Opportunity, OpportunityStatus
+from app.models.entities import Opportunity, OpportunityStatus, Task, TaskAttempt, TaskEvent
+from app.orchestration.state_machine import TaskState, dependencies_satisfied
 from app.services.scoring import calculate_score, should_alert
 from app.services.telegram import send_telegram_message
 
@@ -21,6 +24,50 @@ class OpportunityCreate(BaseModel):
 class ScoreRequest(BaseModel):
     factors: dict[str, float]
     evidence_confidence: float = Field(ge=0, le=100)
+
+
+class TaskCreate(BaseModel):
+    goal: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    instructions: str | None = None
+    allowed_resources: list[str] = Field(default_factory=list)
+    forbidden_actions: list[str] = Field(default_factory=list)
+    acceptance_criteria: str | None = None
+    depends_on: list[int] = Field(default_factory=list)
+    timeout_seconds: int | None = None
+    max_attempts: int = 2
+    budget_eur: float | None = None
+    provider: str | None = None
+    model: str | None = None
+
+
+class TaskSummary(BaseModel):
+    id: int
+    goal: str
+    role: str
+    status: str
+    created_at: datetime
+
+
+class TaskDetail(BaseModel):
+    id: int
+    goal: str
+    role: str
+    instructions: str | None
+    allowed_resources: list
+    forbidden_actions: list
+    acceptance_criteria: str | None
+    depends_on: list
+    status: str
+    timeout_seconds: int | None
+    max_attempts: int
+    budget_eur: float | None
+    required_approvals: list
+    provider: str | None
+    model: str | None
+    created_at: datetime
+    updated_at: datetime
+    attempt_count: int
 
 
 @router.get("/health")
@@ -122,3 +169,100 @@ async def score_opportunity(opportunity_id: int, payload: ScoreRequest, db: Sess
         "breakdown": breakdown,
         "telegram_alert_sent": alerted,
     }
+
+
+def _task_detail(task: Task, db: Session) -> TaskDetail:
+    attempt_count = (
+        db.scalar(select(func.count()).select_from(TaskAttempt).where(TaskAttempt.task_id == task.id)) or 0
+    )
+    return TaskDetail(
+        id=task.id,
+        goal=task.goal,
+        role=task.role,
+        instructions=task.instructions,
+        allowed_resources=task.allowed_resources,
+        forbidden_actions=task.forbidden_actions,
+        acceptance_criteria=task.acceptance_criteria,
+        depends_on=task.depends_on,
+        status=task.status,
+        timeout_seconds=task.timeout_seconds,
+        max_attempts=task.max_attempts,
+        budget_eur=task.budget_eur,
+        required_approvals=task.required_approvals,
+        provider=task.provider,
+        model=task.model,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        attempt_count=attempt_count,
+    )
+
+
+@router.post("/tasks", response_model=TaskDetail, status_code=201)
+def create_task(payload: TaskCreate, db: Session = Depends(get_db)):
+    task = Task(
+        goal=payload.goal,
+        role=payload.role,
+        instructions=payload.instructions,
+        allowed_resources=payload.allowed_resources,
+        forbidden_actions=payload.forbidden_actions,
+        acceptance_criteria=payload.acceptance_criteria,
+        depends_on=payload.depends_on,
+        timeout_seconds=payload.timeout_seconds,
+        max_attempts=payload.max_attempts,
+        budget_eur=payload.budget_eur,
+        provider=payload.provider,
+        model=payload.model,
+        status=TaskState.PLANNED.value,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+
+    db.add(
+        TaskEvent(
+            task_id=task.id,
+            from_state=None,
+            to_state=TaskState.PLANNED.value,
+            actor="human",
+        )
+    )
+    db.commit()
+
+    dependency_tasks = (
+        db.scalars(select(Task).where(Task.id.in_(payload.depends_on))).all() if payload.depends_on else []
+    )
+    found_ids = {t.id for t in dependency_tasks}
+    ready = found_ids == set(payload.depends_on) and dependencies_satisfied(
+        TaskState(t.status) for t in dependency_tasks
+    )
+
+    if ready:
+        task.status = TaskState.READY.value
+        db.add(
+            TaskEvent(
+                task_id=task.id,
+                from_state=TaskState.PLANNED.value,
+                to_state=TaskState.READY.value,
+                actor="orchestrator",
+            )
+        )
+        db.commit()
+        db.refresh(task)
+
+    return _task_detail(task, db)
+
+
+@router.get("/tasks", response_model=list[TaskSummary])
+def list_tasks(db: Session = Depends(get_db)):
+    items = db.scalars(select(Task).order_by(Task.created_at.desc())).all()
+    return [
+        TaskSummary(id=t.id, goal=t.goal, role=t.role, status=t.status, created_at=t.created_at) for t in items
+    ]
+
+
+@router.get("/tasks/{task_id}", response_model=TaskDetail)
+def get_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="task not found")
+    return _task_detail(task, db)
