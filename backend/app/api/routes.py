@@ -199,56 +199,68 @@ def _task_detail(task: Task, db: Session) -> TaskDetail:
 
 @router.post("/tasks", response_model=TaskDetail, status_code=201)
 def create_task(payload: TaskCreate, db: Session = Depends(get_db)):
-    task = Task(
-        goal=payload.goal,
-        role=payload.role,
-        instructions=payload.instructions,
-        allowed_resources=payload.allowed_resources,
-        forbidden_actions=payload.forbidden_actions,
-        acceptance_criteria=payload.acceptance_criteria,
-        depends_on=payload.depends_on,
-        timeout_seconds=payload.timeout_seconds,
-        max_attempts=payload.max_attempts,
-        budget_eur=payload.budget_eur,
-        provider=payload.provider,
-        model=payload.model,
-        status=TaskState.PLANNED.value,
-    )
-    db.add(task)
-    db.commit()
-    db.refresh(task)
-
-    db.add(
-        TaskEvent(
-            task_id=task.id,
-            from_state=None,
-            to_state=TaskState.PLANNED.value,
-            actor="human",
+    """Task row + its creation TaskEvent + an optional immediate PLANNED->READY
+    TaskEvent are one atomic unit: a single commit() at the end, everything
+    before it flushed (not committed) to get task.id. A crash/exception
+    anywhere in between rolls back and leaves nothing behind -- never a Task
+    row with zero TaskEvent history, which would violate TaskEvent's own
+    documented crash-recovery contract (see entities.py). REVIEWER finding
+    (caa30d7): the previous three-separate-commits version could leave
+    exactly that half-written state if the process died between commits.
+    """
+    try:
+        task = Task(
+            goal=payload.goal,
+            role=payload.role,
+            instructions=payload.instructions,
+            allowed_resources=payload.allowed_resources,
+            forbidden_actions=payload.forbidden_actions,
+            acceptance_criteria=payload.acceptance_criteria,
+            depends_on=payload.depends_on,
+            timeout_seconds=payload.timeout_seconds,
+            max_attempts=payload.max_attempts,
+            budget_eur=payload.budget_eur,
+            provider=payload.provider,
+            model=payload.model,
+            status=TaskState.PLANNED.value,
         )
-    )
-    db.commit()
+        db.add(task)
+        db.flush()  # assigns task.id within the still-open transaction, no commit yet
 
-    dependency_tasks = (
-        db.scalars(select(Task).where(Task.id.in_(payload.depends_on))).all() if payload.depends_on else []
-    )
-    found_ids = {t.id for t in dependency_tasks}
-    ready = found_ids == set(payload.depends_on) and dependencies_satisfied(
-        TaskState(t.status) for t in dependency_tasks
-    )
-
-    if ready:
-        task.status = TaskState.READY.value
         db.add(
             TaskEvent(
                 task_id=task.id,
-                from_state=TaskState.PLANNED.value,
-                to_state=TaskState.READY.value,
-                actor="orchestrator",
+                from_state=None,
+                to_state=TaskState.PLANNED.value,
+                actor="human",
             )
         )
-        db.commit()
-        db.refresh(task)
 
+        dependency_tasks = (
+            db.scalars(select(Task).where(Task.id.in_(payload.depends_on))).all() if payload.depends_on else []
+        )
+        found_ids = {t.id for t in dependency_tasks}
+        ready = found_ids == set(payload.depends_on) and dependencies_satisfied(
+            TaskState(t.status) for t in dependency_tasks
+        )
+
+        if ready:
+            task.status = TaskState.READY.value
+            db.add(
+                TaskEvent(
+                    task_id=task.id,
+                    from_state=TaskState.PLANNED.value,
+                    to_state=TaskState.READY.value,
+                    actor="orchestrator",
+                )
+            )
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    db.refresh(task)
     return _task_detail(task, db)
 
 

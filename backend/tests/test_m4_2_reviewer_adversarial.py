@@ -114,16 +114,17 @@ def git_repo(tmp_path):
 # G. WORKTREE / SCOPE SECURITY -- the most critical section
 # ===========================================================================
 
-def test_CRITICAL_untracked_new_file_invisible_to_git_changed_files(git_repo):
-    """FINDING (CRITICAL): the worker's fixed tool set (Read/Edit/Write/
-    Bash(pytest *)) has NO git access -- it can never `git add` anything it
-    creates. Every new file the Write tool creates is therefore untracked in
-    git's eyes for the entire attempt. `_git_changed_files` uses
-    `git diff --name-only <base_ref>`, and plain `git diff` NEVER reports
-    untracked files by design (proven empirically below via `git status`,
-    which DOES see it). Any new out-of-scope file the worker creates is
-    therefore invisible to the layer-2 scope check, unconditionally, every
-    time a task's goal requires creating a new file.
+def test_CRITICAL_untracked_new_file_now_visible_to_git_changed_files(git_repo):
+    """LEAD fix (2026-08-22): was
+    test_CRITICAL_untracked_new_file_invisible_to_git_changed_files,
+    documenting the bug (plain `git diff --name-only <base_ref>` never
+    reports untracked files by design, so a worker's brand-new file was
+    invisible to the layer-2 scope check). _git_changed_files now also runs
+    `git status --porcelain -z --untracked-files=all` and unions it with the
+    base_ref diff -- so the untracked file IS now visible, and the scope
+    violation IS now correctly flagged. Assertions inverted accordingly; the
+    setup and the `git status` sanity check are unchanged from the original
+    finding.
     """
     (git_repo / "backend" / "evil_new_file.py").write_text("print('outside scope')\n")
 
@@ -133,22 +134,18 @@ def test_CRITICAL_untracked_new_file_invisible_to_git_changed_files(git_repo):
     assert "evil_new_file.py" in status  # git itself sees it (as untracked, "??")
 
     changed = _git_changed_files(git_repo, git_repo, base_ref="main")
-    assert "backend/evil_new_file.py" not in changed  # ...but the scope-check's diff does not
+    assert "backend/evil_new_file.py" in changed  # ...and now so does the scope-check's own detection
 
     violations = _check_scope_violation(changed, allowed_resources=["backend/tracked.py"])
-    assert violations == []  # false negative: an out-of-scope file passes as "no violation"
+    assert violations == ["backend/evil_new_file.py"]  # correctly flagged, no more false negative
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="CRITICAL finding: untracked new files bypass the scope check end-to-end through "
-    "the real dispatch_task path (git diff misses untracked files -- see "
-    "test_CRITICAL_untracked_new_file_invisible_to_git_changed_files for the isolated proof). "
-    "This asserts the CORRECT behavior (scope violation -> NEEDS_FIX); it fails today because "
-    "the task instead reaches REVIEW_PENDING. Remove this xfail once _git_changed_files also "
-    "reports untracked files (e.g. via `git status --porcelain` / `git add -A -n` / `-N`).",
-)
 def test_CRITICAL_end_to_end_dispatch_should_catch_untracked_scope_violation(db_session, git_repo):
+    """LEAD fix (2026-08-22): was xfail(strict=True) -- _git_changed_files
+    now unions a `git status --porcelain -z` pass (catches untracked new
+    files) with the existing base_ref diff (catches tracked changes), so
+    this now genuinely passes instead of documenting the bypass. See
+    run_task.py's _git_status_changed_files/_git_diff_against_base."""
     (git_repo / "backend" / "evil_new_file.py").write_text("malicious content\n")
     task = _make_task(db_session, allowed_resources=["backend/tracked.py"])
 
@@ -303,7 +300,21 @@ def test_prompt_injection_text_cannot_alter_cli_permission_flags(payload):
     build_worker_argv constructed -- even when the payload text is itself a
     real flag name (e.g. "--dangerously-skip-permissions"), it lands as the
     single, literal VALUE of the prompt argument, never as an extra argv
-    token of its own."""
+    token of its own.
+
+    LEAD fix (2026-08-22): two of these payloads (the ones that literally
+    start with '-') now instead prove the OTHER, cheaper layer of defense
+    added for the MEDIUM prompt/CLI-argument finding: build_worker_argv now
+    rejects a dash-leading prompt outright, the same as it already did for
+    worktree_name, rather than relying solely on argv-list safety for that
+    specific shape. The remaining, non-dash-leading payloads still prove the
+    original argv-list-safety property unchanged.
+    """
+    if payload.startswith("-"):
+        with pytest.raises(ValueError):
+            build_worker_argv(prompt=payload, worktree_name="task-1-attempt-1")
+        return
+
     argv = build_worker_argv(prompt=payload, worktree_name="task-1-attempt-1")
 
     assert argv[0] == "claude"
@@ -348,22 +359,26 @@ def test_real_build_prompt_output_never_starts_with_a_flag_like_dash_even_when_t
     assert argv[argv.index("--permission-mode") + 1] == "dontAsk"  # untouched by the adversarial fields
 
 
-def test_FINDING_build_worker_argv_does_not_defend_a_raw_flag_shaped_prompt_unlike_worktree_name():
-    """FINDING (MEDIUM): build_worker_argv validates worktree_name against a
-    leading '-' (raises ValueError) but applies NO equivalent check to
-    `prompt`. Not reachable today through the real dispatch_task path (see
-    the test above: _build_prompt's fixed preamble guarantees the -p VALUE
-    never itself looks like a flag) -- but the adapter's own safety here
-    relies entirely on caller discipline rather than being enforced at this
-    trust boundary. If any future caller ever passes an unwrapped Task field
-    directly as `prompt` (bypassing _build_prompt), a value that is itself a
-    real claude CLI flag name could plausibly be reinterpreted by claude's
-    own argv parser as that flag rather than free-text content -- the same
-    class of risk worktree_name is already guarded against.
+def test_prompt_now_defended_against_a_raw_flag_shaped_value_same_as_worktree_name():
+    """LEAD fix (2026-08-22): was
+    test_FINDING_build_worker_argv_does_not_defend_a_raw_flag_shaped_prompt_unlike_worktree_name.
+    Judgment call, documented here rather than silently assumed: argv is
+    always a Python list executed with shell=False, so there is genuinely no
+    shell-injection risk regardless of prompt content (see
+    test_prompt_injection_text_cannot_alter_cli_permission_flags for that
+    proof, unchanged). The remaining, narrower question -- whether claude's
+    OWN internal argv parser could ever re-interpret the token right after
+    `-p` as a new flag instead of -p's value, specifically when that token
+    starts with '-' -- is not confirmed safe or unsafe by any available
+    documentation. Given the one flag this could plausibly affect is
+    bypassPermissions (the single most safety-critical setting in this
+    entire adapter) and the fix costs nothing (no legitimate prompt needs to
+    start with a bare '-', and the real dispatch path never produces one
+    regardless), this is fixed the same way worktree_name already was:
+    reject outright rather than assume the downstream parser is safe.
     """
-    argv = build_worker_argv(prompt="--dangerously-skip-permissions", worktree_name="task-1-attempt-1")
-    # Documents that this succeeds today with no validation error, unlike worktree_name:
-    assert argv[2] == "--dangerously-skip-permissions"
+    with pytest.raises(ValueError):
+        build_worker_argv(prompt="--dangerously-skip-permissions", worktree_name="task-1-attempt-1")
     with pytest.raises(ValueError):
         build_worker_argv(prompt="x", worktree_name="--dangerously-skip-permissions")
 
@@ -542,13 +557,15 @@ def test_api_create_task_does_not_call_validate_transition_directly_but_end_stat
     assert response.json()["status"] == "READY"
 
 
-def test_MEDIUM_create_task_performs_multiple_non_atomic_commits(client):
-    """FINDING (MEDIUM): create_task commits multiple times (Task row +
-    PLANNED; creation TaskEvent; conditionally the READY transition) instead
-    of once. Each commit() is an independent durability point -- a crash
-    between any two leaves a Task row whose TaskEvent history does not yet
-    reflect its real state. Proven by counting real commit() calls for one
-    request that goes straight to READY (dependency-free)."""
+def test_create_task_now_performs_exactly_one_commit(client):
+    """LEAD fix (2026-08-22): was
+    test_MEDIUM_create_task_performs_multiple_non_atomic_commits, which
+    proved three separate commits (Task+PLANNED; creation TaskEvent;
+    conditional READY transition). create_task now builds the Task, its
+    creation TaskEvent, and any immediate READY-transition TaskEvent, then
+    commits exactly once (flush() is used earlier only to assign task.id
+    within the still-open transaction) -- so a request that goes straight to
+    READY (dependency-free) now makes exactly one commit() call, not >= 2."""
     commit_calls = {"n": 0}
     original_commit = SASession.commit
 
@@ -560,26 +577,26 @@ def test_MEDIUM_create_task_performs_multiple_non_atomic_commits(client):
         response = client.post("/api/tasks", json={"goal": "atomicity probe", "role": "builder"})
 
     assert response.status_code == 201
-    assert commit_calls["n"] >= 2  # not a single atomic transaction
+    assert commit_calls["n"] == 1  # one atomic transaction now, not >= 2
 
 
-def test_MEDIUM_crash_between_task_commit_and_event_commit_leaves_task_without_creation_event(client):
-    """FINDING (MEDIUM), consequence of the above: if the process dies after
-    the Task row's own commit but before the creation TaskEvent's commit, the
-    Task row persists with ZERO TaskEvent rows -- violating TaskEvent's own
-    documented crash-recovery contract (entities.py: "re-reading Task +
-    TaskEvent history is enough to resume"). Proven by making exactly the
-    SECOND commit() call raise."""
-    original_commit = SASession.commit
-    call_count = {"n": 0}
+def test_crash_during_task_creation_now_leaves_no_task_row_at_all(client):
+    """LEAD fix (2026-08-22): was
+    test_MEDIUM_crash_between_task_commit_and_event_commit_leaves_task_without_creation_event,
+    which proved a Task row could survive with zero TaskEvent rows if the
+    process died between the old separate commits. Now there is only ONE
+    commit() call for the whole creation, so making that single call raise
+    must roll back everything -- no Task row, no TaskEvent row, nothing
+    half-written. This directly satisfies TaskEvent's own documented
+    crash-recovery contract (entities.py: "re-reading Task + TaskEvent
+    history is enough to resume") by making the failure mode it worries
+    about structurally impossible for creation, rather than merely
+    detectable after the fact."""
 
-    def failing_second_commit(self, *a, **kw):
-        call_count["n"] += 1
-        if call_count["n"] == 2:
-            raise RuntimeError("simulated crash between Task commit and TaskEvent commit")
-        return original_commit(self, *a, **kw)
+    def failing_commit(self, *a, **kw):
+        raise RuntimeError("simulated crash during the single create_task commit")
 
-    with patch.object(SASession, "commit", failing_second_commit):
+    with patch.object(SASession, "commit", failing_commit):
         with pytest.raises(RuntimeError):
             client.post("/api/tasks", json={"goal": "crash probe", "role": "builder"})
 
@@ -590,9 +607,7 @@ def test_MEDIUM_crash_between_task_commit_and_event_commit_leaves_task_without_c
     db = next(db_gen)
     try:
         tasks = db.query(Task).filter(Task.goal == "crash probe").all()
-        assert len(tasks) == 1  # the Task row survived the simulated crash...
-        events = db.query(TaskEvent).filter(TaskEvent.task_id == tasks[0].id).all()
-        assert events == []  # ...but its creation TaskEvent never landed: a silent audit-trail gap
+        assert tasks == []  # nothing half-written: no Task row survives a failed commit at all
     finally:
         db_gen.close()
 
@@ -799,15 +814,13 @@ def test_secret_in_task_event_detail_never_persisted_verbatim(db_session, label,
         assert secret not in (e.detail or "")
 
 
-def test_LOW_finding_usage_dict_values_are_not_sanitized():
-    """FINDING (LOW): sanitize_text() is only applied to scalar string fields
-    (result_text, error_detail, stderr_excerpt, TaskEvent.detail, blockers).
-    WorkerResult.usage is a dict copied through to TaskAttempt.findings["usage"]
-    completely unsanitized. Usage is expected to be plain token-count integers
-    from Claude's own API response, so this is low-severity/defense-in-depth
-    rather than a concretely exploitable leak today -- but it means a
-    secret-shaped string nested inside a "usage" object in the worker's JSON
-    would NOT be redacted before landing in persisted findings."""
+def test_usage_dict_now_strictly_whitelisted_dropping_unexpected_keys():
+    """LEAD fix (2026-08-22): was
+    test_LOW_finding_usage_dict_values_are_not_sanitized. usage is now passed
+    through _sanitize_usage(), which whitelists only the known, non-secret
+    numeric token-count keys Claude's own output documents -- stricter than
+    substring redaction, since an entirely unexpected key like "debug_info"
+    is dropped outright rather than merely having its value redacted."""
     fake_secret = "sk-ant-api03-FAKESECRETFAKESECRETFAKESECRET999999"
     payload = (
         '{"is_error": false, "result": "ok", "session_id": "s1",'
@@ -817,19 +830,23 @@ def test_LOW_finding_usage_dict_values_are_not_sanitized():
         mock_run.return_value = subprocess.CompletedProcess(args=["claude"], returncode=0, stdout=payload, stderr="")
         result = run_worker(prompt="x", repo_path="/repo", worktree_name="wt", timeout_seconds=60)
 
-    # Documents current behavior: the secret survives inside usage, unredacted.
-    assert result.usage["debug_info"] == fake_secret
+    assert result.usage == {"input_tokens": 5}  # debug_info (and its secret) dropped entirely
+    assert "debug_info" not in result.usage
+    assert fake_secret not in str(result.usage)
 
 
-def test_LOW_finding_session_id_is_not_sanitized():
-    """FINDING (LOW): session_id is stored verbatim from the parsed JSON with no
-    sanitize_text() pass, unlike result_text/error_detail/stderr_excerpt."""
+def test_session_id_now_sanitized_same_as_other_scalar_fields():
+    """LEAD fix (2026-08-22): was test_LOW_finding_session_id_is_not_sanitized.
+    session_id now goes through sanitize_text() like result_text/error_detail/
+    stderr_excerpt -- a secret-shaped session_id gets redacted, not stored
+    verbatim."""
     fake_secret = "sk-ant-api03-FAKESESSIONIDDOUBLINGASSECRET000000"
     payload = f'{{"is_error": false, "result": "ok", "session_id": "{fake_secret}"}}'
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(args=["claude"], returncode=0, stdout=payload, stderr="")
         result = run_worker(prompt="x", repo_path="/repo", worktree_name="wt", timeout_seconds=60)
-    assert result.session_id == fake_secret  # documents current unsanitized pass-through
+    assert result.session_id != fake_secret
+    assert fake_secret not in (result.session_id or "")
 
 
 def test_very_long_stderr_is_truncated_not_persisted_unbounded():

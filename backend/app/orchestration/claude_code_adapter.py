@@ -63,6 +63,30 @@ def sanitize_text(text: str | None, max_len: int = 2000) -> str | None:
     return redacted
 
 
+# REVIEWER finding (caa30d7, LOW): usage was copied through to
+# TaskAttempt.findings["usage"] with no sanitization at all, unlike every
+# other persisted field. sanitize_text()'s substring-redaction approach
+# doesn't fit a dict well -- it would still let an entirely unexpected key
+# (e.g. a "debug_info" field never documented for this JSON shape) through
+# untouched. Whitelisting is stricter and simpler: only the known,
+# non-secret numeric token-count fields Claude Code's own output documents
+# survive; anything else is dropped outright, not merely redacted.
+_USAGE_ALLOWED_KEYS = frozenset({
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+})
+
+
+def _sanitize_usage(usage: dict) -> dict:
+    return {
+        key: value
+        for key, value in usage.items()
+        if key in _USAGE_ALLOWED_KEYS and isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+
+
 def _decode(value: bytes | str | None) -> str | None:
     if value is None:
         return None
@@ -117,10 +141,28 @@ def build_worker_argv(
     never exposed as a caller-controlled parameter -- and the tool list is
     always scoped (see _validate_allowed_tools). No --continue/--resume:
     every call starts a fresh session in a fresh worktree.
+
+    REVIEWER finding (caa30d7, MEDIUM): worktree_name was guarded against a
+    leading '-' but prompt was not, even though argv is a Python list
+    executed with shell=False -- so there is no shell-injection risk, only a
+    narrower question of whether claude's OWN argv parser could ever
+    re-interpret the token right after `-p` as a flag rather than -p's
+    value if it starts with '-'. Not reachable today: the real dispatch path
+    always builds prompt via _build_prompt(), whose fixed preamble
+    guarantees it never starts with '-' regardless of Task content (see
+    test_real_build_prompt_output_never_starts_with_a_flag_like_dash_even_when_task_fields_are_adversarial).
+    Fixed anyway, for the same reason worktree_name already is: Claude
+    Code's exact internal argv-parsing behavior for a dash-leading `-p`
+    value isn't confirmed one way or the other in available documentation,
+    and rejecting it outright costs nothing (no legitimate prompt needs to
+    start with a bare '-') while closing the gap for any future caller of
+    this function that bypasses _build_prompt.
     """
     _validate_allowed_tools(allowed_tools)
     if not worktree_name or worktree_name.startswith("-"):
         raise ValueError(f"invalid worktree_name {worktree_name!r}")
+    if not prompt or prompt.startswith("-"):
+        raise ValueError(f"invalid prompt: must be non-empty and must not start with '-'")
 
     return [
         claude_binary,
@@ -235,9 +277,9 @@ def run_worker(
     return WorkerResult(
         ok=ok,
         exit_code=completed.returncode,
-        session_id=session_id if isinstance(session_id, str) else None,
+        session_id=sanitize_text(session_id) if isinstance(session_id, str) else None,
         result_text=sanitize_text(result_text) if isinstance(result_text, str) else None,
-        usage=usage,
+        usage=_sanitize_usage(usage),
         total_cost_usd=float(total_cost_usd) if isinstance(total_cost_usd, (int, float)) else None,
         is_error=is_error,
         error_kind=None if ok else "nonzero_exit",

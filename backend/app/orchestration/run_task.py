@@ -145,17 +145,93 @@ def _resolve_worktree_path(repo_path: str | Path, worktree_name: str) -> Path:
     raise RuntimeError(f"could not resolve worktree path for '{worktree_name}'")
 
 
-def _git_changed_files(repo_path: str | Path, worktree_path: Path, base_ref: str = "main") -> list[str]:
-    """Real, independent diff of the worktree against base_ref -- never trusts the worker's self-report."""
+def _run_git_z(argv: list[str], cwd: str | Path, timeout: int) -> list[str]:
+    """Run a git command that supports `-z` NUL-terminated output, and split
+    it into raw path/entry tokens. -z is used throughout this module's git
+    calls specifically to avoid v1 porcelain's C-style quoting of filenames
+    with spaces/special characters -- tokens come back byte-for-byte as git
+    has them, nothing to unquote.
+    """
     completed = subprocess.run(
-        ["git", "diff", "--name-only", base_ref],
-        cwd=worktree_path,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
+        argv, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, check=False,
     )
-    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"`{' '.join(argv)}` failed (exit {completed.returncode}): "
+            f"{sanitize_text(completed.stderr, max_len=500)}"
+        )
+    tokens = completed.stdout.split("\0")
+    if tokens and tokens[-1] == "":
+        tokens = tokens[:-1]
+    return tokens
+
+
+def _git_diff_against_base(worktree_path: str | Path, base_ref: str) -> list[str]:
+    """Committed/staged/unstaged changes to TRACKED files relative to base_ref.
+
+    By git's own design, plain `git diff` never reports untracked files --
+    see _git_status_changed_files for those. Kept as an additional,
+    independent source (union'd in _git_changed_files below) so a worktree
+    whose branch has actually diverged from base_ref via a real commit is
+    still fully covered, not just its live working-tree status.
+    """
+    return _run_git_z(["git", "diff", "--name-only", "-z", base_ref], worktree_path, timeout=60)
+
+
+def _git_status_changed_files(worktree_path: str | Path) -> list[str]:
+    """Everything `git status` sees relative to the worktree's current HEAD:
+    modified, added, deleted, renamed/copied (staged or not), AND untracked
+    files -- `--untracked-files=all` so a new file inside a brand-new
+    directory is listed individually rather than collapsed into one
+    "newdir/" line, which `_check_scope_violation`'s per-file prefix check
+    needs. This is what plain `git diff` structurally cannot report (see the
+    CRITICAL finding this function exists to close: a worker's Write tool
+    creates files that stay untracked for the whole attempt, since the
+    worker's fixed tool set has no git access to stage/commit them).
+    """
+    tokens = _run_git_z(
+        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        worktree_path, timeout=60,
+    )
+    paths: list[str] = []
+    i = 0
+    while i < len(tokens):
+        entry = tokens[i]
+        i += 1
+        if len(entry) < 4:
+            # Fail closed on anything not shaped like "XY <path>" rather than
+            # silently dropping an entry we don't understand.
+            raise RuntimeError(f"unexpected `git status` entry: {entry!r}")
+        status, path = entry[:2], entry[3:]
+        paths.append(path)
+        if status[0] in ("R", "C") or status[1] in ("R", "C"):
+            # Rename/copy: git emits one extra NUL-separated "from" path
+            # immediately after. Only the new path matters for scope
+            # checking, but it must still be consumed so the next iteration
+            # doesn't misparse it as its own status/path entry.
+            if i >= len(tokens):
+                raise RuntimeError(f"`git status` rename/copy entry missing its 'from' path: {entry!r}")
+            i += 1
+    return paths
+
+
+def _git_changed_files(repo_path: str | Path, worktree_path: Path, base_ref: str = "main") -> list[str]:
+    """Every file the worker could plausibly have touched in this attempt --
+    never trusts the worker's self-report, and never silently under-reports.
+
+    Union of two independent sources: a diff of tracked files against
+    base_ref (covers a worktree branch that has actually diverged via a real
+    commit), and the worktree's live `git status` (covers everything
+    uncommitted -- modified/added/deleted/renamed AND untracked new files,
+    which the base_ref diff alone cannot see). Either source failing (e.g.
+    the worktree path is not a real git repo, or a git invocation errors)
+    raises rather than returning a partial/empty list -- a scope check that
+    silently saw "no changes" on a git failure would be worse than one that
+    stops the attempt outright.
+    """
+    from_diff = _git_diff_against_base(worktree_path, base_ref)
+    from_status = _git_status_changed_files(worktree_path)
+    return list(dict.fromkeys([*from_diff, *from_status]))
 
 
 def _run_pytest(worktree_path: Path) -> SuiteRunResult:
