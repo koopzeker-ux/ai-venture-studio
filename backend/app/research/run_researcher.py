@@ -37,7 +37,7 @@ from typing import Callable, Sequence
 from sqlalchemy.orm import Session
 
 from app.models.entities import AgentRun, Evidence, Opportunity
-from app.orchestration.claude_code_adapter import WorkerResult, sanitize_text
+from app.orchestration.claude_code_adapter import WorkerResult, _sanitize_usage, sanitize_text
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_RESEARCH_TOOLS: tuple[str, ...] = ("WebSearch", "WebFetch")
 
 DEFAULT_RESEARCH_TIMEOUT_SECONDS = 1200
+
+# LEAD pre-review (M3.2 INTELLIGENCE round): --max-budget-usd is supported
+# by the installed CLI (v2.1.241; confirmed via `claude --help`, "only
+# works with --print" -- this module always uses -p/--print) and is added
+# here as a hard, caller-non-overridable per-run cap. It is a module
+# constant baked directly into build_research_argv()'s return value, not a
+# function parameter, specifically so no caller can raise, lower, or omit
+# it. Matches the €2-equivalent budget approved for the first live
+# validation run (one Opportunity, one call).
+MAX_BUDGET_USD = "2.00"
 
 EVIDENCE_TYPE_RESEARCH_FINDING = "research_finding"
 
@@ -110,7 +120,9 @@ def build_research_argv(
     (always a fresh session). --safe-mode disables ambient customization
     (CLAUDE.md, skills, plugins, hooks, MCP) while keeping auth/built-in
     tools/permissions normal -- confirmed present on the installed CLI
-    (v2.1.241) the same way M4.2's auth-fix confirmed it.
+    (v2.1.241) the same way M4.2's auth-fix confirmed it. --max-budget-usd
+    is always appended as MAX_BUDGET_USD, a module constant rather than a
+    parameter -- no caller of this function can raise, lower, or omit it.
     """
     _validate_research_tools(allowed_tools)
     if not prompt or prompt.startswith("-"):
@@ -123,6 +135,7 @@ def build_research_argv(
         "--permission-mode", "dontAsk",
         "--allowedTools", *allowed_tools,
         "--safe-mode",
+        "--max-budget-usd", MAX_BUDGET_USD,
     ]
 
 
@@ -194,8 +207,24 @@ def run_researcher(
             stderr_excerpt=stderr_excerpt,
         )
 
-    session_id = parsed.get("session_id")
-    usage = parsed.get("usage") if isinstance(parsed.get("usage"), dict) else {}
+    # LEAD pre-review (M3.2 INTELLIGENCE round): session_id is now
+    # sanitized the same way M4.2's run_worker() does (short value, no
+    # truncation risk). result_text is deliberately left unsanitized here
+    # -- it is the raw, potentially large (multi-entry dossier) JSON blob
+    # that parse_research_payload() still needs to json.loads() intact;
+    # sanitize_text()'s default max_len=2000 would silently truncate and
+    # corrupt any realistically-sized research payload before it could
+    # even be parsed. Secret-shaped substring redaction is instead applied
+    # per-field, after parsing, to the specific strings that actually get
+    # persisted (claim/source/source_url/research_summary in
+    # parse_research_payload()) -- see there.
+    session_id = sanitize_text(parsed.get("session_id")) if isinstance(parsed.get("session_id"), str) else None
+    # LEAD pre-review (M3.2 INTELLIGENCE round): whitelisted the same way
+    # M4.2's run_worker() does (claude_code_adapter._sanitize_usage,
+    # REVIEWER finding caa30d7) -- an unexpected key here previously
+    # survived sanitize_text()'s substring redaction untouched, since
+    # substring redaction doesn't inspect dict keys/shape at all.
+    usage = _sanitize_usage(parsed.get("usage")) if isinstance(parsed.get("usage"), dict) else {}
     total_cost_usd = parsed.get("total_cost_usd")
     is_error = bool(parsed.get("is_error", completed.returncode != 0))
     result_text = parsed.get("result")
@@ -290,6 +319,16 @@ def _coerce_confidence(value: object, anomalies: list[str]) -> float:
         return float(value)
     if value is not None:
         anomalies.append(f"confidence value {value!r} out of range/invalid; using default {_DEFAULT_CONFIDENCE}")
+    else:
+        # LEAD review (M3.2 pre-review): Evidence.confidence is a
+        # non-nullable Float with no "not assessed" sentinel, so a
+        # researcher who responsibly declines to estimate (returns null,
+        # exactly as the prompt invites) would otherwise collapse into the
+        # same 0.5 as a genuine medium-confidence assertion, with zero
+        # trace. Always recording an anomaly here (not just on
+        # out-of-range/invalid values) keeps that distinction visible in
+        # AgentRun.output_summary without changing the schema.
+        anomalies.append(f"confidence not provided (researcher declined to estimate); using default {_DEFAULT_CONFIDENCE}")
     return _DEFAULT_CONFIDENCE
 
 
@@ -366,7 +405,19 @@ def parse_research_payload(result_text: str) -> ResearchPayload:
             )
 
         source_url = raw.get("source_url")
-        source_url = source_url if isinstance(source_url, str) and source_url.strip() else None
+        # LEAD pre-review (M3.2 INTELLIGENCE round): claim/source/source_url
+        # are web-derived text (WebSearch/WebFetch results are explicitly
+        # untrusted, per the prompt) about to be persisted into Evidence
+        # rows -- redact secret-shaped substrings the same way M4.2 does
+        # for every other piece of subprocess-derived text before it's
+        # stored, rather than only for stderr/error text. Applied here
+        # (post-json.loads, per already-parsed field) rather than to the
+        # raw result_text blob, so redaction can never corrupt the JSON
+        # structure being parsed, and generous max_len values avoid
+        # silently truncating a legitimate long-form claim/URL.
+        source_url = (
+            sanitize_text(source_url, max_len=2000) if isinstance(source_url, str) and source_url.strip() else None
+        )
 
         confidence = _coerce_confidence(raw.get("confidence"), entry_anomalies)
         found_at = _parse_found_at(raw.get("found_at"), entry_anomalies)
@@ -377,10 +428,10 @@ def parse_research_payload(result_text: str) -> ResearchPayload:
         entries.append(
             NormalizedEvidenceEntry(
                 temp_id=temp_id,
-                claim=claim.strip(),
+                claim=sanitize_text(claim.strip(), max_len=4000) or "",
                 claim_type=claim_type,
                 stance=stance,
-                source=source.strip(),
+                source=sanitize_text(source.strip(), max_len=500) or "",
                 source_url=source_url,
                 found_at=found_at,
                 source_reliability=source_reliability,
@@ -391,7 +442,11 @@ def parse_research_payload(result_text: str) -> ResearchPayload:
         )
         anomalies.extend(entry_anomalies)
 
-    return ResearchPayload(entries=entries, research_summary=summary.strip(), anomalies=anomalies)
+    return ResearchPayload(
+        entries=entries,
+        research_summary=sanitize_text(summary.strip(), max_len=20000) or "",
+        anomalies=anomalies,
+    )
 
 
 def _normalize_claim_key(claim: str) -> str:

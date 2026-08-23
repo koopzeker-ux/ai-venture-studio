@@ -21,6 +21,7 @@ from app.models.entities import AgentRun, CostEvent, Evidence, Opportunity
 from app.orchestration.claude_code_adapter import WorkerResult
 from app.research.run_researcher import (
     DEFAULT_RESEARCH_TOOLS,
+    MAX_BUDGET_USD,
     OpportunityNotFoundError,
     ResearchAlreadyExistsError,
     ResearchPayloadError,
@@ -116,13 +117,52 @@ def test_1_build_research_argv_exact_shape():
         "--permission-mode", "dontAsk",
         "--allowedTools", "WebSearch", "WebFetch",
         "--safe-mode",
+        "--max-budget-usd", "2.00",
     ]
+
+
+# ---------------------------------------------------------------------------
+# --max-budget-usd: hard, caller-non-overridable per-run cost cap
+# ---------------------------------------------------------------------------
+
+def test_max_budget_usd_constant_is_two_dollars_or_less():
+    assert float(MAX_BUDGET_USD) <= 2.00
+
+
+def test_max_budget_usd_always_present_in_argv():
+    argv = build_research_argv(prompt="x")
+    assert "--max-budget-usd" in argv
+    idx = argv.index("--max-budget-usd")
+    assert argv[idx + 1] == MAX_BUDGET_USD
+    assert float(argv[idx + 1]) <= 2.00
+
+
+def test_build_research_argv_has_no_budget_parameter():
+    """MAX_BUDGET_USD is a module constant, not a function parameter --
+    there is no keyword argument through which a caller could raise, lower,
+    or omit the cap. Calling with an unexpected budget-like kwarg must
+    fail loudly (TypeError), not silently override anything."""
+    import inspect
+    params = inspect.signature(build_research_argv).parameters
+    assert "max_budget_usd" not in params
+    assert "budget" not in params
+    with pytest.raises(TypeError):
+        build_research_argv(prompt="x", max_budget_usd="999.00")  # type: ignore[call-arg]
+
+
+def test_max_budget_usd_present_even_with_custom_tools_and_binary():
+    argv = build_research_argv(prompt="x", allowed_tools=("WebSearch",), claude_binary="/usr/local/bin/claude")
+    assert argv[-2:] == ["--max-budget-usd", MAX_BUDGET_USD]
 
 
 def test_2_safe_mode_always_present():
     argv = build_research_argv(prompt="x")
     assert "--safe-mode" in argv
-    assert argv[-1] == "--safe-mode"
+    # --max-budget-usd is deliberately appended after --safe-mode (see the
+    # budget-cap tests below), so --safe-mode is no longer the last token,
+    # but it must still immediately precede the budget flag.
+    idx = argv.index("--safe-mode")
+    assert argv[idx + 1] == "--max-budget-usd"
 
 
 def test_3_dontask_always_present():
@@ -221,6 +261,21 @@ def test_10b_model_error_envelope_is_structured_failure():
     assert result.error_kind == "nonzero_exit"
 
 
+def test_10d_usage_dict_is_whitelisted_not_merely_redacted():
+    """Mirrors M4.2's claude_code_adapter._sanitize_usage discipline
+    (REVIEWER finding caa30d7): an unexpected/unexpected-shaped usage key
+    must be dropped outright, not merely left alone because it doesn't
+    match a secret-shaped regex."""
+    payload = _envelope(
+        [{"id": "e1", "claim": "x", "source": "y"}],
+        "Summary with all sections.",
+        usage={"input_tokens": 5, "output_tokens": 7, "debug_info": "unexpected", "nested": {"a": 1}},
+    )
+    with patch("subprocess.run", return_value=_completed(returncode=0, stdout=payload)):
+        result = run_researcher(prompt="x", repo_path="/repo")
+    assert result.usage == {"input_tokens": 5, "output_tokens": 7}
+
+
 def test_10c_spawn_failure_is_structured_failure():
     with patch("subprocess.run", side_effect=OSError("claude: not found")):
         result = run_researcher(prompt="x", repo_path="/repo")
@@ -277,9 +332,14 @@ def test_13_source_reliability_validation_accepts_known_rejects_unknown_value():
 
 
 def test_14_unknown_is_a_legitimate_value_not_an_anomaly():
+    # confidence is supplied explicitly here so this test stays about
+    # claim_type/source_reliability UNKNOWN semantics only -- omitting
+    # confidence is covered separately below, since (unlike claim_type/
+    # source_reliability) the schema has no "UNKNOWN" sentinel for it and
+    # an omitted confidence is deliberately still flagged (LEAD review).
     payload = json.dumps({
         "evidence": [
-            {"claim": "a", "source": "s", "claim_type": "UNKNOWN", "source_reliability": "UNKNOWN"},
+            {"claim": "a", "source": "s", "claim_type": "UNKNOWN", "source_reliability": "UNKNOWN", "confidence": 0.6},
         ],
         "research_summary": "s",
     })
@@ -287,6 +347,23 @@ def test_14_unknown_is_a_legitimate_value_not_an_anomaly():
     assert result.entries[0].claim_type == "UNKNOWN"
     assert result.entries[0].source_reliability == "UNKNOWN"
     assert result.anomalies == []
+
+
+def test_14b_omitted_confidence_defaults_but_is_recorded_as_an_anomaly():
+    """Evidence.confidence has no nullable/"UNKNOWN" sentinel (non-nullable
+    Float column, default 0.5) -- a researcher that responsibly declines to
+    estimate (returns null, exactly as the prompt invites) would otherwise
+    be indistinguishable from one that genuinely asserted 0.5. LEAD
+    pre-review decision: keep the schema unchanged, but always record the
+    fallback as an anomaly so the distinction survives in
+    AgentRun.output_summary."""
+    payload = json.dumps({
+        "evidence": [{"claim": "a", "source": "s", "confidence": None}],
+        "research_summary": "s",
+    })
+    result = parse_research_payload(payload)
+    assert result.entries[0].confidence == 0.5
+    assert any("confidence not provided" in a for a in result.anomalies)
 
 
 def test_15_missing_source_url_stays_null_never_fabricated():
@@ -648,6 +725,44 @@ def test_secret_in_failure_detail_never_reaches_agentrun_output_summary(db_sessi
         run_researcher_fn=lambda **kw: _fail_worker_result("nonzero_exit", f"failed, leaked {secret} here"),
     )
     assert secret not in run.output_summary
+
+
+@pytest.mark.parametrize("label,secret", list(_FAKE_SECRETS.items()))
+def test_secret_shaped_text_in_evidence_fields_is_redacted_before_persistence(label, secret):
+    """Web-fetched content is untrusted (per the research prompt); a
+    secret-shaped substring quoted inside a claim/source/source_url/
+    research_summary must never reach Evidence/Opportunity rows verbatim,
+    same discipline as M4.2 applies to subprocess stderr/error text."""
+    payload = json.dumps({
+        "evidence": [
+            {
+                "claim": f"A leaked credential was found: {secret}",
+                "source": f"forum post ({secret})",
+                "source_url": f"https://example.com/leak?token={secret}",
+            }
+        ],
+        "research_summary": f"Summary mentioning {secret} in passing.",
+    })
+    result = parse_research_payload(payload)
+    entry = result.entries[0]
+    assert secret not in entry.claim
+    assert secret not in entry.source
+    assert secret not in (entry.source_url or "")
+    assert secret not in result.research_summary
+
+
+def test_long_research_summary_is_not_truncated_by_default_sanitize_max_len():
+    """sanitize_text()'s default max_len=2000 would silently corrupt a
+    realistic multi-section research_summary (8 mandatory sections) --
+    parse_research_payload() must use a generous max_len for this field."""
+    long_summary = "Section text. " * 400  # well over 2000 chars, no secrets
+    payload = json.dumps({
+        "evidence": [{"claim": "a", "source": "s"}],
+        "research_summary": long_summary,
+    })
+    result = parse_research_payload(payload)
+    assert result.research_summary == long_summary.strip()
+    assert "[truncated]" not in result.research_summary
 
 
 def test_session_identifiers_are_bounded_not_treated_as_secret_but_stored_safely():
