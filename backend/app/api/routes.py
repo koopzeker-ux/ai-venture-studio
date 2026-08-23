@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.models.entities import Opportunity, OpportunityStatus, Task, TaskAttempt, TaskEvent
+from app.models.entities import Evidence, Opportunity, OpportunityStatus, Task, TaskAttempt, TaskEvent
 from app.orchestration.state_machine import TaskState, dependencies_satisfied
 from app.services.scoring import calculate_score, should_alert
 from app.services.telegram import send_telegram_message
@@ -24,6 +24,34 @@ class OpportunityCreate(BaseModel):
 class ScoreRequest(BaseModel):
     factors: dict[str, float]
     evidence_confidence: float = Field(ge=0, le=100)
+
+
+class DossierEvidenceItem(BaseModel):
+    evidence_id: int
+    claim_type: str | None
+    source: str
+    source_url: str | None
+    found_at: datetime | None
+    source_reliability: str | None
+    confidence: float
+    duplicate_of_evidence_id: int | None
+
+
+class DossierClaimGroup(BaseModel):
+    claim: str
+    independent_confirmations: int
+    supports: list[DossierEvidenceItem]
+    contradicts: list[DossierEvidenceItem]
+    unspecified: list[DossierEvidenceItem]
+
+
+class OpportunityDossier(BaseModel):
+    id: int
+    title: str
+    thesis: str
+    status: OpportunityStatus
+    research_summary: str | None
+    claims: list[DossierClaimGroup]
 
 
 class TaskCreate(BaseModel):
@@ -169,6 +197,83 @@ async def score_opportunity(opportunity_id: int, payload: ScoreRequest, db: Sess
         "breakdown": breakdown,
         "telegram_alert_sent": alerted,
     }
+
+
+def _normalize_claim_key(claim: str) -> str:
+    """Groups claims that differ only by whitespace/casing under one entry.
+
+    The displayed `claim` text for a group is the original (non-normalized)
+    text of the first row encountered for that key -- only the grouping key
+    itself is normalized.
+    """
+    return " ".join(claim.split()).casefold()
+
+
+def _dossier_evidence_item(evidence: Evidence) -> DossierEvidenceItem:
+    return DossierEvidenceItem(
+        evidence_id=evidence.id,
+        claim_type=evidence.claim_type,
+        source=evidence.source,
+        source_url=evidence.source_url,
+        found_at=evidence.found_at,
+        source_reliability=evidence.source_reliability,
+        confidence=evidence.confidence,
+        duplicate_of_evidence_id=evidence.duplicate_of_evidence_id,
+    )
+
+
+@router.get("/opportunities/{opportunity_id}/dossier", response_model=OpportunityDossier)
+def get_opportunity_dossier(opportunity_id: int, db: Session = Depends(get_db)):
+    """Read-only research dossier: Evidence grouped by (normalized) claim text.
+
+    A row's `stance` is relative to its own `claim` column only, never to
+    Opportunity.thesis (see the field's docstring in app.models.entities).
+    "Independent confirmations" per claim group counts rows with
+    duplicate_of_evidence_id IS NULL -- a row marked as a duplicate of
+    another is still shown (under whichever stance list it belongs to), it
+    just doesn't add to that count.
+    """
+    opportunity = db.get(Opportunity, opportunity_id)
+    if not opportunity:
+        raise HTTPException(status_code=404, detail="opportunity not found")
+
+    rows = db.scalars(
+        select(Evidence).where(Evidence.opportunity_id == opportunity_id).order_by(Evidence.id)
+    ).all()
+
+    groups: dict[str, dict] = {}
+    group_order: list[str] = []
+    for row in rows:
+        key = _normalize_claim_key(row.claim)
+        if key not in groups:
+            groups[key] = {
+                "claim": row.claim,
+                "independent_confirmations": 0,
+                "supports": [],
+                "contradicts": [],
+                "unspecified": [],
+            }
+            group_order.append(key)
+
+        group = groups[key]
+        item = _dossier_evidence_item(row)
+        if row.stance == "SUPPORTS":
+            group["supports"].append(item)
+        elif row.stance == "CONTRADICTS":
+            group["contradicts"].append(item)
+        else:
+            group["unspecified"].append(item)
+        if row.duplicate_of_evidence_id is None:
+            group["independent_confirmations"] += 1
+
+    return OpportunityDossier(
+        id=opportunity.id,
+        title=opportunity.title,
+        thesis=opportunity.thesis,
+        status=opportunity.status,
+        research_summary=opportunity.research_summary,
+        claims=[DossierClaimGroup(**groups[key]) for key in group_order],
+    )
 
 
 def _task_detail(task: Task, db: Session) -> TaskDetail:

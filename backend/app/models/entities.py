@@ -46,6 +46,9 @@ class Opportunity(Base):
     score: Mapped[float | None] = mapped_column(Float)
     evidence_confidence: Mapped[float | None] = mapped_column(Float)
     score_breakdown: Mapped[dict] = mapped_column(JSON, default=dict)
+    # M3.2: free-text researcher synthesis of the opportunity's evidence
+    # dossier. Nullable -- only populated once a research pass has run.
+    research_summary: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -59,10 +62,34 @@ class Evidence(Base):
     opportunity_id: Mapped[int] = mapped_column(ForeignKey("opportunities.id", ondelete="CASCADE"), index=True)
     claim: Mapped[str] = mapped_column(Text)
     evidence_type: Mapped[str] = mapped_column(String(80))
+    # M3.2: application-level enum (FACT, INFERENCE, ESTIMATE, UNKNOWN), not a
+    # DB-level enum -- keeps the vocabulary extensible without a migration.
+    # Nullable: only populated once a research pass has classified the claim.
+    claim_type: Mapped[str | None] = mapped_column(String(20))
     source: Mapped[str] = mapped_column(String(120))
     source_url: Mapped[str | None] = mapped_column(Text)
+    # M3.2: application-level enum (SUPPORTS, CONTRADICTS). Deliberate,
+    # previously-corrected design decision: this is ALWAYS relative to
+    # `claim` on this same row, NEVER relative to Opportunity.thesis. A row
+    # never states whether the opportunity's thesis holds -- only whether
+    # this row's own evidence supports or contradicts its own claim text.
+    stance: Mapped[str | None] = mapped_column(String(20))
+    # M3.2: publication date of the source, distinct from `created_at` (when
+    # we recorded the row). Nullable: not every source exposes one.
+    found_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # M3.2: application-level enum (HIGH, MEDIUM, LOW, UNKNOWN). Deliberately
+    # categorical, not Float -- a numeric score would imply a precision of
+    # measurement research assessment doesn't actually have.
+    source_reliability: Mapped[str | None] = mapped_column(String(20))
     confidence: Mapped[float] = mapped_column(Float, default=0.5)
     independently_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # M3.2: self-FK marking this row as a duplicate observation of another
+    # Evidence row for the same claim. NULL means this row counts toward the
+    # claim group's independent-confirmation count; non-NULL means it does
+    # not (see GET /api/opportunities/{id}/dossier).
+    duplicate_of_evidence_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evidence.id", ondelete="SET NULL"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     opportunity: Mapped[Opportunity] = relationship(back_populates="evidence")
