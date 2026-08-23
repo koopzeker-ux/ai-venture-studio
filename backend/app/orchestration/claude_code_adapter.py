@@ -14,6 +14,9 @@ there (see tests/test_claude_code_adapter.py).
 
 CLI flags used here were verified against `claude --help` (installed CLI
 version 2.1.238) before writing this module -- see build_worker_argv().
+--safe-mode replaced --bare in the M4.2 auth-fix once the real dogfood run
+showed --bare blocks OAuth auth; --safe-mode's availability was confirmed
+against CLI version 2.1.241.
 """
 
 from __future__ import annotations
@@ -142,6 +145,22 @@ def build_worker_argv(
     always scoped (see _validate_allowed_tools). No --continue/--resume:
     every call starts a fresh session in a fresh worktree.
 
+    M4.2 auth-fix (2026-08-23, real dogfood run): uses --safe-mode, not
+    --bare. The real dogfood run proved headless auth via
+    CLAUDE_CODE_OAUTH_TOKEN works, but --bare blocks it outright (--bare's
+    own help text restricts auth to ANTHROPIC_API_KEY/apiKeyHelper only,
+    explicitly excluding OAuth) -- so every worker invocation was failing to
+    authenticate. --safe-mode (CLI v2.1.241+) is the flag that actually
+    matches what this adapter needs: normal auth (OAuth included), built-in
+    tools, and permissions keep working exactly as before, while it still
+    disables the same class of ambient customization --bare did (CLAUDE.md,
+    skills, plugins, hooks, MCP servers, custom commands/agents, output
+    styles, workflows) -- so the worker still only ever sees this function's
+    explicit prompt/tools/permission-mode, never repo- or
+    machine-local configuration it didn't ask for. All the actual security
+    boundaries (dontAsk, the fixed tool allowlist, no bypassPermissions, no
+    --continue/--resume) are unchanged by this swap.
+
     REVIEWER finding (caa30d7, MEDIUM): worktree_name was guarded against a
     leading '-' but prompt was not, even though argv is a Python list
     executed with shell=False -- so there is no shell-injection risk, only a
@@ -171,7 +190,7 @@ def build_worker_argv(
         "--permission-mode", "dontAsk",
         "--allowedTools", *allowed_tools,
         "--worktree", worktree_name,
-        "--bare",
+        "--safe-mode",
     ]
 
 
