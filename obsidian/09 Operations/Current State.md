@@ -1,5 +1,91 @@
 # Current State
 
+## Milestone M4.2 — COMPLETE (2026-08-23)
+"One Local Worker" — the orchestrator can now automatically start, control,
+and safely persist the result of one real, local Claude Code worker
+attempt, with no manual prompt-copying between terminals. First slice
+where LEAD/BUILDER/INTELLIGENCE/REVIEWER's own conventions (worktree
+isolation, disjoint scope, independent review) are applied *to the
+orchestrator itself*, not just to app code.
+
+**Integrated:**
+- `agent/builder` (`574b553`): minimal Task API (`POST/GET /api/tasks`,
+  `GET /api/tasks/{id}`), using the M4.1 state machine's pure
+  `dependencies_satisfied()` guard for the PLANNED->READY auto-transition.
+- `agent/intelligence` (`8fac31d`): `ClaudeCodeAdapter` (real `claude -p`
+  subprocess invocation, structured `WorkerResult`, secret sanitization)
+  + `run_task.dispatch_task()` binding Task/TaskAttempt/TaskEvent + the M4.1
+  state machine + the adapter for exactly one bounded attempt — no
+  auto-retry, no reviewer/fix-loop (that's M4.3).
+- `agent/reviewer` (`caa30d7`): independent adversarial review (own
+  fixtures, real disposable git repos for git-behavior claims) found one
+  **CRITICAL** finding — `_git_changed_files()` used only `git diff
+  --name-only <base_ref>`, which by design never reports untracked files,
+  so any new out-of-scope file the worker's Write tool created bypassed
+  the layer-2 `allowed_resources` scope check unconditionally — plus 2
+  MEDIUM (Task-creation non-atomicity; no leading-dash guard on the `-p`
+  prompt value) and 1 LOW (usage/session_id not sanitized) finding.
+- **LEAD fix round** (`ef3ffac`): CRITICAL fixed by unioning the base_ref
+  diff with a new `git status --porcelain=v1 -z --untracked-files=all`
+  pass (both fail-closed on any git error); Task creation made fully
+  atomic (one flush + one commit, rollback on any exception); the
+  leading-dash prompt guard added (matching `worktree_name`'s existing
+  one) after judging the downstream `claude` argv-parser behavior
+  unconfirmed by any available doc, given the one flag it could plausibly
+  affect is `bypassPermissions`; `session_id` sanitized, `usage` strictly
+  whitelisted to known non-secret token-count keys. REVIEWER's own
+  characterization tests updated to match (never weakened). Full suite:
+  238 -> 368 (REVIEWER) -> 381 (LEAD fixes).
+- **Live dogfood, attempt 1** (2026-08-22, Task 1): real dispatch failed
+  fast and safely on authentication — `--bare` (used since M4.2's first
+  handoff) restricts Claude Code auth to `ANTHROPIC_API_KEY`/`apiKeyHelper`
+  only, explicitly excluding OAuth, per `--bare`'s own `--help` text.
+  Correctly routed to `NEEDS_FIX`, `cost_eur` stayed 0.0, no scope/security
+  issue -- the safety systems worked exactly as designed on a real failure.
+- **Auth-fix** (`240bda0`/merge `8a35ca6`, INTELLIGENCE): swapped `--bare`
+  for `--safe-mode` (confirmed via the installed CLI's own `--help`,
+  v2.1.241: "Auth, model selection, built-in tools, and permissions work
+  normally", while still disabling the same ambient-customization surface
+  --bare did). LEAD independently re-verified both claims against the real
+  installed binary before merging (not just trusting the handoff summary).
+  Calibration (`claude -p "Reply only with OK" --output-format json
+  --safe-mode`, not a dispatch): `is_error:false`, `result:"OK"`,
+  `total_cost_usd: 0.0256`. Full suite: 381 -> 387.
+- **Live dogfood, attempt 2** (2026-08-23, Task 2) — **succeeded
+  end-to-end, first real proof of the whole M4.2 pipeline**: a real
+  Claude Code worker, dispatched automatically (no manual prompt-copying),
+  created exactly the one in-scope file
+  (`backend/tests/dogfood_m4_2_marker.txt`, exact requested content) in a
+  real, isolated git worktree (`.claude/worktrees/task-2-attempt-1`, branch
+  `worktree-task-2-attempt-1`) that `_resolve_worktree_path()` correctly
+  resolved for the first time via real production code (attempt 1 never
+  reached that call, having failed earlier at auth) -- confirming the
+  `.endswith(worktree_name)` matching strategy against Claude Code's real
+  `worktree-`-prefixed branch naming. The (CRITICAL-fix-round) untracked-
+  file-aware scope check correctly saw and allowed the one new file
+  (`git status --porcelain` inside the worktree showed exactly that one
+  line); the independent, real pytest run inside the worktree passed
+  (387/387); `main`'s own working tree never changed. Task reached
+  `REVIEW_PENDING` (READY->RUNNING->TESTING->REVIEW_PENDING, one
+  TaskAttempt, matching TaskEvents). `cost_eur` stayed 0.0;
+  `total_cost_usd` ($0.038) and `usage` landed only in `findings`, never
+  fabricated into EUR. No secrets observed anywhere in the real payload.
+  No auto-merge, no auto-push. Both dogfood worktrees/branches cleaned up
+  afterward (verified their locking process had already exited before
+  removal); Task/TaskAttempt/TaskEvent audit history for both attempts
+  preserved in a dedicated SQLite file (not the live Postgres -- the host
+  has no direct network path to the `db` container, and `claude` is only
+  installed on the host, not in the Linux API container; every other part
+  of the run was 100% real).
+- Full backend suite: **387 passed, 0 failed**, stable across repeated runs
+  throughout the milestone's final rounds.
+
+No LLM/API calls in any test, no new paid provider beyond the existing
+Claude Code subscription already in use, no scheduler/polling loop, no
+multi-worker concurrency, no reviewer/fix-loop, no auto-merge/push --
+exactly the M4.2 scope. M4.3 (Builder -> Reviewer -> bounded fix-loop) not
+started.
+
 ## Milestone M4.1 — COMPLETE (2026-08-21)
 First slice of M4 "Agent Orchestration Layer" (see `07 Agents/Orchestrator.md`
 for the North-Star requirement this milestone was designed against). Goal:

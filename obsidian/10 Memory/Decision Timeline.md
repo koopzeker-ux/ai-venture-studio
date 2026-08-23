@@ -195,3 +195,35 @@
   detail in `09 Operations/Current State.md`. No LLM/API calls, no new
   paid provider, no worker execution anywhere in M4.1. M4.2 (a real
   dispatched worker) not started. Approved by project owner.
+- 2026-08-23: Milestone M4.2 ("One Local Worker") marked COMPLETE. Why
+  complete: a real Claude Code worker, automatically dispatched via
+  `dispatch_task()` with zero manual prompt-copying, completed a real
+  bounded task end-to-end in a real isolated git worktree, was independently
+  verified (not trusted) by a real pytest run and a real git-status scope
+  check, and landed the task at `REVIEW_PENDING` with correct
+  Task/TaskAttempt/TaskEvent audit history and correct cost bookkeeping —
+  proven live on 2026-08-23, not just by tests. Two real problems were
+  found and fixed via live use, not by review alone: (1) `--bare` (used
+  since the first BUILDER/INTELLIGENCE handoff) turned out to restrict
+  Claude Code auth to `ANTHROPIC_API_KEY`/`apiKeyHelper` only, excluding
+  OAuth — discovered because the first live dogfood attempt failed fast and
+  safely on "Not logged in" despite a valid interactive login; fixed by
+  swapping to `--safe-mode`, which the installed CLI's own `--help` confirms
+  keeps "Auth, model selection, built-in tools, and permissions" working
+  normally while still disabling the same ambient-customization surface
+  `--bare` did. LEAD independently re-verified this against the real
+  installed binary before merging, not just the handoff's summary. (2)
+  REVIEWER's independent adversarial review (own fixtures, real disposable
+  git repos) found a CRITICAL scope-check bypass: `_git_changed_files()`
+  used only `git diff --name-only`, which never reports untracked files by
+  design, so any new out-of-scope file a worker's Write tool created was
+  invisible to the layer-2 `allowed_resources` check, unconditionally, for
+  every task whose goal required creating a file — fixed by unioning the
+  existing diff with `git status --porcelain -z --untracked-files=all`,
+  both fail-closed on any git error. Full backend suite: 238 -> 296 (M4.2
+  handoff) -> 368 (REVIEWER) -> 381 (LEAD CRITICAL+MEDIUM+LOW fixes) -> 387
+  (auth-fix). No LLM/API calls in any test, no new paid provider beyond the
+  existing Claude Code subscription, no scheduler/polling loop, no
+  multi-worker concurrency, no reviewer/fix-loop, no auto-merge/push — the
+  bounded fix-loop and Integrator are M4.3/M4.4, not started. Full detail
+  in `09 Operations/Current State.md`. Approved by project owner.
