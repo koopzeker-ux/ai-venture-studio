@@ -37,7 +37,7 @@ def test_build_worker_argv_matches_verified_cli_form():
         "--permission-mode", "dontAsk",
         "--allowedTools", "Read", "Edit", "Write", "Bash(pytest *)",
         "--worktree", "task-1-attempt-1",
-        "--bare",
+        "--safe-mode",
     ]
 
 
@@ -84,6 +84,66 @@ def test_empty_allowed_tools_rejected():
 def test_worktree_name_cannot_look_like_a_flag():
     with pytest.raises(ValueError):
         build_worker_argv(prompt="x", worktree_name="--dangerously-skip-permissions")
+
+
+# ---------------------------------------------------------------------------
+# M4.2 auth-fix (2026-08-23): --bare -> --safe-mode.
+#
+# The real dogfood run showed --bare blocks headless OAuth auth via
+# CLAUDE_CODE_OAUTH_TOKEN (its own help text restricts auth to
+# ANTHROPIC_API_KEY/apiKeyHelper, explicitly excluding OAuth). --safe-mode
+# (confirmed present on the installed CLI, v2.1.241) keeps auth/built-in
+# tools/permissions working normally while still disabling the same class
+# of ambient customization --bare did (CLAUDE.md, skills, plugins, hooks,
+# MCP, etc). Tests A-F below prove the swap changed exactly what it should
+# and nothing else -- no real `claude` invocation, subprocess.run mocked
+# throughout.
+# ---------------------------------------------------------------------------
+
+def test_A_safe_mode_always_present_in_worker_argv():
+    argv = build_worker_argv(prompt="x", worktree_name="wt")
+    assert "--safe-mode" in argv
+    assert argv[-1] == "--safe-mode"
+
+
+def test_B_bare_flag_never_appears_again():
+    argv = build_worker_argv(prompt="x", worktree_name="wt")
+    assert "--bare" not in argv
+
+
+def test_C_bypass_permissions_still_impossible_after_auth_fix():
+    argv = build_worker_argv(prompt="x", worktree_name="wt")
+    joined = " ".join(argv)
+    assert "bypassPermissions" not in joined
+    assert "--dangerously-skip-permissions" not in argv
+    assert "--allow-dangerously-skip-permissions" not in argv
+
+
+def test_D_permission_mode_still_exactly_dontask_after_auth_fix():
+    argv = build_worker_argv(prompt="x", worktree_name="wt")
+    assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
+    assert argv.count("--permission-mode") == 1
+
+
+def test_E_allowed_tools_still_exactly_the_fixed_contract_after_auth_fix():
+    argv = build_worker_argv(prompt="x", worktree_name="wt")
+    tools_start = argv.index("--allowedTools") + 1
+    tools_end = argv.index("--worktree")
+    assert argv[tools_start:tools_end] == ["Read", "Edit", "Write", "Bash(pytest *)"]
+    assert argv[tools_start:tools_end] == list(DEFAULT_ALLOWED_TOOLS)
+
+
+def test_F_run_worker_does_not_override_subprocess_environment():
+    """No env= kwarg is ever passed to subprocess.run, so the child process
+    inherits the orchestrator's own ambient environment -- including
+    CLAUDE_CODE_OAUTH_TOKEN -- unchanged. Passing env={} or a stripped-down
+    dict here would silently break OAuth auth even with --safe-mode."""
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = _completed(returncode=0, stdout='{"is_error": false, "result": "ok"}')
+        run_worker(prompt="x", repo_path="/repo", worktree_name="wt", timeout_seconds=60)
+
+    _, kwargs = mock_run.call_args
+    assert "env" not in kwargs
 
 
 # ---------------------------------------------------------------------------

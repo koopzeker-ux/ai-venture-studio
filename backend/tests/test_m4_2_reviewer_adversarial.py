@@ -328,7 +328,7 @@ def test_prompt_injection_text_cannot_alter_cli_permission_flags(payload):
     assert argv[2] == payload
     assert argv.count(payload) == 1
     # Fixed skeleton: claude,-p,<prompt>,--output-format,json,--permission-mode,dontAsk,
-    # --allowedTools,<tools...>,--worktree,<name>,--bare
+    # --allowedTools,<tools...>,--worktree,<name>,--safe-mode
     assert len(argv) == 11 + len(DEFAULT_ALLOWED_TOOLS)
 
 
