@@ -64,8 +64,12 @@ def test_upgrade_head_adds_evidence_dossier_columns(migrated_db):
         assert name in columns, f"evidence.{name} missing after migration"
         assert columns[name]["nullable"] is nullable, f"evidence.{name} nullable mismatch"
 
-    # Untouched pre-existing columns, including confidence (must stay as-is).
-    assert columns["confidence"]["nullable"] is False
+    # confidence was untouched BY THIS migration (9147d90b16c5) -- but this
+    # fixture upgrades all the way to "head", which now also includes a
+    # later migration (a943ce8ca51f, LEAD finding-1 decision) that makes
+    # confidence nullable. See test_m3_2_confidence_nullable_migration.py
+    # for a test that isolates that migration's own before/after effect.
+    assert columns["confidence"]["nullable"] is True
 
 
 def test_evidence_duplicate_of_self_fk_and_index(migrated_db):
@@ -92,14 +96,17 @@ def test_opportunity_gains_nullable_research_summary(migrated_db):
 
 
 def test_downgrade_removes_only_m3_2_columns(migrated_db):
-    """Downgrading one step should drop the new columns/FK/index and leave
-    every other column on evidence/opportunities untouched."""
+    """Downgrading two steps (this migration, 9147d90b16c5, plus the later
+    a943ce8ca51f confidence-nullable migration LEAD added on top of it --
+    the fixture upgrades to "head", not to this revision specifically)
+    should drop the new columns/FK/index and leave every other column on
+    evidence/opportunities untouched."""
     engine, cfg = migrated_db
     inspector = inspect(engine)
     evidence_columns_before = {c["name"] for c in inspector.get_columns("evidence")}
     opportunity_columns_before = {c["name"] for c in inspector.get_columns("opportunities")}
 
-    command.downgrade(cfg, "-1")
+    command.downgrade(cfg, "-2")
 
     inspector = inspect(engine)
     evidence_columns_after = {c["name"] for c in inspector.get_columns("evidence")}

@@ -349,20 +349,18 @@ def test_14_unknown_is_a_legitimate_value_not_an_anomaly():
     assert result.anomalies == []
 
 
-def test_14b_omitted_confidence_defaults_but_is_recorded_as_an_anomaly():
-    """Evidence.confidence has no nullable/"UNKNOWN" sentinel (non-nullable
-    Float column, default 0.5) -- a researcher that responsibly declines to
-    estimate (returns null, exactly as the prompt invites) would otherwise
-    be indistinguishable from one that genuinely asserted 0.5. LEAD
-    pre-review decision: keep the schema unchanged, but always record the
-    fallback as an anomaly so the distinction survives in
-    AgentRun.output_summary."""
+def test_14b_omitted_confidence_becomes_null_and_is_recorded_as_an_anomaly():
+    """Superseded by the M3.2 REVIEWER round: Evidence.confidence is now
+    nullable (Alembic revision a943ce8ca51f) -- a researcher that
+    responsibly declines to estimate (returns null, exactly as the prompt
+    invites) gets a real NULL, never a fabricated 0.5. Still recorded as an
+    anomaly so the reason is visible in AgentRun.output_summary."""
     payload = json.dumps({
         "evidence": [{"claim": "a", "source": "s", "confidence": None}],
         "research_summary": "s",
     })
     result = parse_research_payload(payload)
-    assert result.entries[0].confidence == 0.5
+    assert result.entries[0].confidence is None
     assert any("confidence not provided" in a for a in result.anomalies)
 
 
@@ -385,7 +383,7 @@ def test_16_supporting_and_contradicting_evidence_both_parsed():
     assert result.entries[1].stance == "CONTRADICTS"
 
 
-def test_confidence_out_of_range_falls_back_to_default_not_fabricated_precision():
+def test_confidence_out_of_range_falls_back_to_null_not_fabricated_precision():
     payload = json.dumps({
         "evidence": [
             {"claim": "a", "source": "s", "confidence": 5},
@@ -395,8 +393,8 @@ def test_confidence_out_of_range_falls_back_to_default_not_fabricated_precision(
         "research_summary": "s",
     })
     result = parse_research_payload(payload)
-    assert result.entries[0].confidence == 0.5
-    assert result.entries[1].confidence == 0.5
+    assert result.entries[0].confidence is None
+    assert result.entries[1].confidence is None
     assert result.entries[2].confidence == 0.73
 
 
@@ -467,6 +465,33 @@ def test_17_duplicate_temp_id_resolves_end_to_end_to_real_fk(db_session):
     original, duplicate = rows
     assert original.duplicate_of_evidence_id is None
     assert duplicate.duplicate_of_evidence_id == original.id
+
+
+def test_duplicate_of_can_never_cross_opportunities_for_a_researcher_run(db_session):
+    """LEAD decision (M3.2 REVIEWER finding 2, LOW): duplicate temp-id
+    resolution is scoped to the single batch passed into one
+    dispatch_research() call for one Opportunity -- two separate dispatches
+    for two different opportunities can never resolve a duplicate_of link
+    across them, even if they happen to reuse the same temp_id ("e1")."""
+    opp_a = _make_opportunity(db_session, slug="opp-a")
+    opp_b = _make_opportunity(db_session, slug="opp-b")
+
+    evidence_a = [{"id": "e1", "claim": "Claim A", "source": "s"}]
+    dispatch_research(db_session, opp_a.id, repo_path="/fake", run_researcher_fn=lambda **kw: _ok_worker_result(evidence_a))
+
+    # opp_b's own batch reuses temp_id "e1" and references it -- must
+    # resolve within opp_b's batch only, never to opp_a's row of the same id.
+    evidence_b = [
+        {"id": "e1", "claim": "Claim B", "source": "s1"},
+        {"id": "e2", "claim": "Claim B", "source": "s2", "duplicate_of": "e1"},
+    ]
+    dispatch_research(db_session, opp_b.id, repo_path="/fake", run_researcher_fn=lambda **kw: _ok_worker_result(evidence_b))
+
+    rows_b = db_session.scalars(select(Evidence).where(Evidence.opportunity_id == opp_b.id).order_by(Evidence.id)).all()
+    e1_b, e2_b = rows_b
+    assert e2_b.duplicate_of_evidence_id == e1_b.id  # resolved within opp_b's own batch
+    row_a = db_session.scalars(select(Evidence).where(Evidence.opportunity_id == opp_a.id)).one()
+    assert e2_b.duplicate_of_evidence_id != row_a.id  # never resolves to the other opportunity's row
 
 
 def test_18_unknown_duplicate_ref_fails_safe_to_null(db_session):

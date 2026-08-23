@@ -157,15 +157,19 @@ def test_opportunity_research_summary_is_nullable_text():
     assert isinstance(col.type, Text)
 
 
-def test_evidence_confidence_column_unchanged_by_m3_2():
-    """Evidence.confidence must remain exactly what M3.1 established:
-    non-nullable Float, default 0.5 -- the brief explicitly calls out this
-    must NOT change in M3.2."""
+def test_evidence_confidence_column_now_nullable_per_lead_finding1_decision():
+    """Superseded by LEAD's decision on this file's own MEDIUM finding
+    (confidence-honesty gap): at review time confidence was non-nullable
+    Float, default 0.5, and this test asserted that as "unchanged by
+    M3.2". LEAD's follow-up decision (Alembic revision a943ce8ca51f) made
+    it nullable with no fallback default, specifically so "not assessed"
+    can be a real NULL instead of a fabricated 0.5 -- inverted here rather
+    than left asserting the now-superseded behavior."""
     from sqlalchemy import Float
     col = Evidence.__table__.columns["confidence"]
     assert isinstance(col.type, Float)
-    assert col.nullable is False
-    assert col.default.arg == 0.5
+    assert col.nullable is True
+    assert col.default is None
 
 
 def test_costevent_and_task_schema_untouched_by_m3_2():
@@ -700,24 +704,27 @@ def test_case_whitespace_variant_claims_still_confirm_each_other_at_computation_
 # 7. Confidence / UNKNOWN honesty
 # ===========================================================================
 
-def test_missing_confidence_defaults_to_0_5_and_is_recorded_as_anomaly():
+def test_missing_confidence_becomes_null_and_is_recorded_as_anomaly():
+    """Superseded by LEAD's finding-1 decision: confidence is now nullable
+    (Alembic revision a943ce8ca51f), so a declined confidence is a real
+    NULL, not a 0.5 fallback."""
     payload = parse_research_payload(json.dumps({
         "evidence": [{"id": "e1", "claim": "c", "source": "s"}],  # no confidence key at all
         "research_summary": "s",
     }))
-    assert payload.entries[0].confidence == 0.5
+    assert payload.entries[0].confidence is None
     assert any("declined to estimate" in a for a in payload.entries[0].anomalies)
 
 
-def test_FINDING_dossier_response_cannot_distinguish_genuine_0_5_from_fallback_0_5(db_session):
-    """MEDIUM finding: DossierEvidenceItem.confidence is a bare float. A
-    genuinely-estimated 0.5 and a "researcher declined, defaulted" 0.5 are
-    schema-identical in the dossier response -- the anomaly trail exists
-    ONLY in AgentRun.output_summary, keyed by JSON-array position
-    ("evidence[{idx}]"), not by the persisted Evidence.id, and is truncated
-    to the first 20 anomalies (_build_output_summary). A dossier consumer
-    reading Evidence rows alone has no way to flag which confidence values
-    are unearned."""
+def test_FIXED_dossier_response_now_distinguishes_genuine_0_5_from_declined_null(db_session):
+    """Regression guard for this file's own MEDIUM finding
+    (test_FINDING_dossier_response_cannot_distinguish_genuine_0_5_from_fallback_0_5,
+    as originally reported): LEAD's decision made Evidence.confidence
+    nullable (Alembic revision a943ce8ca51f) with no fallback value, so a
+    genuinely-estimated 0.5 and a declined-to-estimate row are no longer
+    schema-identical -- the second is now a real NULL. Inverted, not
+    deleted, so a future regression back to a fabricated fallback value
+    would be caught here."""
     opp = _make_opportunity(db_session)
     evidence = [
         {"id": "e1", "claim": "genuinely medium confidence", "source": "s", "confidence": 0.5},
@@ -725,11 +732,9 @@ def test_FINDING_dossier_response_cannot_distinguish_genuine_0_5_from_fallback_0
     ]
     run = dispatch_research(db_session, opp.id, repo_path="/fake", run_researcher_fn=lambda **kw: _ok_worker_result(evidence))
     rows = {r.claim: r for r in db_session.scalars(select(Evidence).where(Evidence.opportunity_id == opp.id)).all()}
-    assert rows["genuinely medium confidence"].confidence == rows["declined to estimate"].confidence == 0.5
-    # The anomaly text exists in AgentRun, but nothing on the Evidence row
-    # itself (no column) lets a dossier reader map it back per-row.
+    assert rows["genuinely medium confidence"].confidence == 0.5
+    assert rows["declined to estimate"].confidence is None
     assert "declined to estimate" in run.output_summary
-    assert not hasattr(rows["declined to estimate"], "confidence_is_fallback")
 
 
 def test_UNKNOWN_claim_type_and_source_reliability_survive_end_to_end_to_dossier(client):
@@ -741,12 +746,12 @@ def test_UNKNOWN_claim_type_and_source_reliability_survive_end_to_end_to_dossier
     assert item["source_reliability"] == "UNKNOWN"
 
 
-def test_out_of_range_confidence_falls_back_with_anomaly_not_clamped_silently():
+def test_out_of_range_confidence_falls_back_to_null_with_anomaly_not_clamped_silently():
     payload = parse_research_payload(json.dumps({
         "evidence": [{"id": "e1", "claim": "c", "source": "s", "confidence": 5.0}],
         "research_summary": "s",
     }))
-    assert payload.entries[0].confidence == 0.5
+    assert payload.entries[0].confidence is None
     assert any("out of range" in a for a in payload.entries[0].anomalies)
 
 
@@ -755,7 +760,7 @@ def test_confidence_as_bool_is_rejected_not_silently_coerced_to_1_or_0():
         "evidence": [{"id": "e1", "claim": "c", "source": "s", "confidence": True}],
         "research_summary": "s",
     }))
-    assert payload.entries[0].confidence == 0.5
+    assert payload.entries[0].confidence is None
     assert any("must be numeric, got bool" in a for a in payload.entries[0].anomalies)
 
 

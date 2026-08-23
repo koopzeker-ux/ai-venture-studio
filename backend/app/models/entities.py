@@ -81,7 +81,18 @@ class Evidence(Base):
     # categorical, not Float -- a numeric score would imply a precision of
     # measurement research assessment doesn't actually have.
     source_reliability: Mapped[str | None] = mapped_column(String(20))
-    confidence: Mapped[float] = mapped_column(Float, default=0.5)
+    # LEAD decision (M3.2 REVIEWER finding 1, MEDIUM): was previously
+    # non-nullable with a Python-level default=0.5, which made a
+    # genuinely-estimated 0.5 indistinguishable from "no responsible
+    # confidence could be assigned" -- the only place that distinction
+    # existed was free-text in AgentRun.output_summary, keyed by JSON-array
+    # position, not the Evidence row itself. Made nullable via Alembic
+    # revision a943ce8ca51f (additive: DROP NOT NULL, no backfill, no data
+    # loss); NULL now means "not assessed", never a stand-in for a real
+    # number. No writer in the codebase relied on the old implicit default
+    # -- every current writer (collectors, researcher) always sets this
+    # explicitly.
+    confidence: Mapped[float | None] = mapped_column(Float)
     independently_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     # M3.2: self-FK marking this row as a duplicate observation of another
     # Evidence row for the same claim. NULL means this row counts toward the

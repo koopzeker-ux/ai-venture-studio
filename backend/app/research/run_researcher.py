@@ -66,13 +66,16 @@ CLAIM_TYPES = frozenset({"FACT", "INFERENCE", "ESTIMATE", "UNKNOWN"})
 STANCES = frozenset({"SUPPORTS", "CONTRADICTS"})
 SOURCE_RELIABILITIES = frozenset({"HIGH", "MEDIUM", "LOW", "UNKNOWN"})
 
-# Evidence.confidence is a non-nullable Float column with an established
-# 0.5 default (see app.models.entities and app.collectors.pipeline) that
-# this module must not change. "If not responsibly assignable, record
-# null" (the M3.2 brief) is realized as "fall back to that existing
-# neutral default" -- the closest honest equivalent the current schema
-# allows, rather than fabricating false precision.
-_DEFAULT_CONFIDENCE = 0.5
+# LEAD decision (M3.2 REVIEWER finding 1, MEDIUM, superseding the earlier
+# INTELLIGENCE-round approach): Evidence.confidence is now a nullable Float
+# (Alembic revision a943ce8ca51f) with no fallback value at all -- a
+# researcher that cannot responsibly assign a confidence (declines via
+# null, or supplies something invalid/out-of-range) gets NULL, never a
+# fabricated number. This directly realizes "if not responsibly
+# assignable, record null" (the original M3.2 brief) instead of the
+# earlier "closest honest equivalent" workaround of reusing the schema's
+# old 0.5 default, which REVIEWER correctly flagged as indistinguishable
+# from a genuine medium-confidence assertion once persisted.
 
 
 class OpportunityNotFoundError(Exception):
@@ -289,7 +292,7 @@ class NormalizedEvidenceEntry:
     source_url: str | None
     found_at: datetime | None
     source_reliability: str
-    confidence: float
+    confidence: float | None
     duplicate_of_temp_id: str | None
     anomalies: list[str] = field(default_factory=list)
 
@@ -311,25 +314,23 @@ def _coerce_enum_or_none(value: object, allowed: frozenset[str]) -> str | None:
     return value if isinstance(value, str) and value in allowed else None
 
 
-def _coerce_confidence(value: object, anomalies: list[str]) -> float:
+def _coerce_confidence(value: object, anomalies: list[str]) -> float | None:
+    """Returns the researcher's own confidence when it is a real, trustworthy
+    number in [0, 1]; NULL in every other case (declined/missing, wrong
+    type, out of range) -- never a fabricated stand-in value. Every
+    fallback-to-null path is recorded as an anomaly so it stays visible in
+    AgentRun.output_summary even though the row itself now honestly
+    encodes "not assessed" as NULL rather than a number."""
     if isinstance(value, bool):
-        anomalies.append(f"confidence must be numeric, got bool {value!r}; using default")
-        return _DEFAULT_CONFIDENCE
+        anomalies.append(f"confidence must be numeric, got bool {value!r}; left null")
+        return None
     if isinstance(value, (int, float)) and 0.0 <= float(value) <= 1.0:
         return float(value)
     if value is not None:
-        anomalies.append(f"confidence value {value!r} out of range/invalid; using default {_DEFAULT_CONFIDENCE}")
+        anomalies.append(f"confidence value {value!r} out of range/invalid; left null")
     else:
-        # LEAD review (M3.2 pre-review): Evidence.confidence is a
-        # non-nullable Float with no "not assessed" sentinel, so a
-        # researcher who responsibly declines to estimate (returns null,
-        # exactly as the prompt invites) would otherwise collapse into the
-        # same 0.5 as a genuine medium-confidence assertion, with zero
-        # trace. Always recording an anomaly here (not just on
-        # out-of-range/invalid values) keeps that distinction visible in
-        # AgentRun.output_summary without changing the schema.
-        anomalies.append(f"confidence not provided (researcher declined to estimate); using default {_DEFAULT_CONFIDENCE}")
-    return _DEFAULT_CONFIDENCE
+        anomalies.append("confidence not provided (researcher declined to estimate); left null")
+    return None
 
 
 def _parse_found_at(value: object, anomalies: list[str]) -> datetime | None:
@@ -462,7 +463,20 @@ def _resolve_duplicate_refs(entries: list[NormalizedEvidenceEntry]) -> dict[int,
     """Best-effort duplicate_of resolution within this single batch only --
     no cross-run provenance graph. Fails safe: a reference to an unknown or
     self temp_id resolves to None (not a duplicate) rather than raising or
-    guessing, and is recorded as an anomaly on the referencing entry."""
+    guessing, and is recorded as an anomaly on the referencing entry.
+
+    LEAD decision (M3.2 REVIEWER finding 2, LOW): `known_ids` is built only
+    from `entries` -- the single batch passed in for one dispatch_research()
+    call on one Opportunity -- so a resolved duplicate_of_evidence_id can
+    only ever point at another row from the SAME batch/Opportunity for any
+    link the Researcher pipeline itself creates. No additional
+    same-opportunity constraint was added (DB-level or here) because this
+    already fully closes the gap for every write path this module owns.
+    The schema's self-FK has no such constraint of its own, so a
+    cross-opportunity link remains possible only via manual/legacy writes
+    outside this module -- accepted as documented residual risk (dossier
+    endpoint fails safe against it; see its own test coverage), not fixed
+    with new DB machinery (CLAUDE.md SS15)."""
     known_ids = {e.temp_id for e in entries if e.temp_id}
     resolved: dict[int, str | None] = {}
     for i, entry in enumerate(entries):
@@ -647,6 +661,20 @@ def dispatch_research(
     stays in AgentRun.output_summary as a USD estimate only -- cost_eur
     stays at the schema default 0.0, and no CostEvent is written (no
     EUR-conversion contract exists for this).
+
+    LEAD decision (M3.2 REVIEWER finding 3, LOW): the "exactly one AgentRun
+    per dispatch, even on failure" guarantee assumes the database itself is
+    reachable. Each of the three failure branches below calls
+    _log_agent_run() directly with no try/except of its own; if the DB
+    fails BOTH the main write AND that fallback logging commit -- a genuine
+    double failure, i.e. a total outage -- zero AgentRun rows survive and
+    the exception propagates uncaught out of dispatch_research. Deliberately
+    not fixed: restructuring the failure-logging path into its own
+    independent transaction/connection to survive a total DB outage is
+    more machinery than this edge case's real-world impact justifies for
+    M3.2 (CLAUDE.md SS15) -- audit-persistence itself cannot be guaranteed
+    during a total outage, and that is an accepted limitation, not a
+    silent gap.
     """
     opportunity = db.get(Opportunity, opportunity_id)
     if opportunity is None:

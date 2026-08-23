@@ -33,7 +33,10 @@ class DossierEvidenceItem(BaseModel):
     source_url: str | None
     found_at: datetime | None
     source_reliability: str | None
-    confidence: float
+    # LEAD decision (M3.2 REVIEWER finding 1, MEDIUM): Evidence.confidence
+    # is now nullable (Alembic revision a943ce8ca51f) -- NULL means "not
+    # assessed", distinct from any real number the researcher assigned.
+    confidence: float | None
     duplicate_of_evidence_id: int | None
 
 
