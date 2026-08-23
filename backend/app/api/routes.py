@@ -39,7 +39,23 @@ class DossierEvidenceItem(BaseModel):
 
 class DossierClaimGroup(BaseModel):
     claim: str
-    independent_confirmations: int
+    # LEAD pre-review correction (M3.2): a plain int named "independent
+    # confirmations" reads, on its own, as a stronger claim than what this
+    # actually is -- see the Field description below, which is what
+    # actually reaches API consumers/OpenAPI docs (the endpoint's own
+    # docstring does not). Kept as a count, not renamed: the description
+    # carries the honesty, not the identifier.
+    independent_confirmations: int = Field(
+        description=(
+            "Count of evidence rows in this claim group with "
+            "duplicate_of_evidence_id IS NULL. This is NOT a measure of "
+            "proven source independence -- it only reflects rows not "
+            "flagged (by the researcher pass) as citing another row's "
+            "source. Duplicate-flagged rows are still listed in "
+            "supports/contradicts/unspecified below; they are simply "
+            "excluded from this count."
+        )
+    )
     supports: list[DossierEvidenceItem]
     contradicts: list[DossierEvidenceItem]
     unspecified: list[DossierEvidenceItem]
