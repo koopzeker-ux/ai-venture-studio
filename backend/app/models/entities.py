@@ -49,6 +49,12 @@ class Opportunity(Base):
     # M3.2: free-text researcher synthesis of the opportunity's evidence
     # dossier. Nullable -- only populated once a research pass has run.
     research_summary: Mapped[str | None] = mapped_column(Text)
+    # M3.3: free-text Opportunity Evaluation ("Critic") memo -- decision
+    # support, not approval. Distinct from research_summary (research
+    # output) and from AgentRun.output_summary (audit/run metadata).
+    # Nullable -- only populated once a critic pass has run. Writing this
+    # column is out of scope for this slice (see backend BUILDER M3.3).
+    critic_summary: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

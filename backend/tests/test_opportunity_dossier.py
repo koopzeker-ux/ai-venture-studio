@@ -6,6 +6,10 @@ is always relative to that row's own `claim`, never to Opportunity.thesis),
 and counts "independent confirmations" as rows with
 duplicate_of_evidence_id IS NULL. No LLM call, no write path, no Task/
 ClaudeCodeAdapter involvement -- that is out of scope for this endpoint.
+
+M3.3 BUILDER addendum: the dossier response also carries
+Opportunity.critic_summary (nullable, decision-support memo text). Still
+read-only -- this slice adds no write path for it.
 """
 
 from datetime import datetime
@@ -64,6 +68,7 @@ def test_dossier_with_no_evidence(client):
     assert body["thesis"] == "thesis text"
     assert body["status"] == "discovered"
     assert body["research_summary"] is None
+    assert body["critic_summary"] is None
     assert body["claims"] == []
 
 
@@ -181,3 +186,57 @@ def test_dossier_includes_research_summary_and_thesis_relative_stance_fields(cli
     assert body["research_summary"] == "Synthesis of the evidence so far."
     # stance is relative to this row's own claim, never to opportunity.thesis
     assert body["claims"][0]["contradicts"][0]["found_at"].startswith("2026-01-15")
+
+
+def test_dossier_includes_critic_summary_when_present(client):
+    opp = create_opportunity(client)
+
+    db_gen = app.dependency_overrides[get_db_dep]()
+    db = next(db_gen)
+    try:
+        from app.models.entities import Opportunity
+
+        row = db.get(Opportunity, opp["id"])
+        row.critic_summary = "Evaluation memo: TEST recommended, cheapest experiment is a landing page."
+        db.commit()
+    finally:
+        db_gen.close()
+
+    body = client.get(f"/api/opportunities/{opp['id']}/dossier").json()
+    assert body["critic_summary"] == (
+        "Evaluation memo: TEST recommended, cheapest experiment is a landing page."
+    )
+
+
+def test_dossier_critic_summary_independent_of_research_summary(client):
+    """research_summary and critic_summary are separate columns -- setting
+    one must not affect the other, and both are surfaced independently."""
+    opp = create_opportunity(client)
+
+    db_gen = app.dependency_overrides[get_db_dep]()
+    db = next(db_gen)
+    try:
+        from app.models.entities import Opportunity
+
+        row = db.get(Opportunity, opp["id"])
+        row.research_summary = "Research synthesis text."
+        row.critic_summary = "Critic evaluation text."
+        db.commit()
+    finally:
+        db_gen.close()
+
+    body = client.get(f"/api/opportunities/{opp['id']}/dossier").json()
+    assert body["research_summary"] == "Research synthesis text."
+    assert body["critic_summary"] == "Critic evaluation text."
+    assert body["research_summary"] != body["critic_summary"]
+
+
+def test_dossier_endpoint_stays_read_only_for_critic_summary(client):
+    """GET must never mutate critic_summary as a side effect."""
+    opp = create_opportunity(client)
+
+    client.get(f"/api/opportunities/{opp['id']}/dossier")
+    client.get(f"/api/opportunities/{opp['id']}/dossier")
+
+    body = client.get(f"/api/opportunities/{opp['id']}/dossier").json()
+    assert body["critic_summary"] is None

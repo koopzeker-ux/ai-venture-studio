@@ -70,6 +70,9 @@ class OpportunityDossier(BaseModel):
     thesis: str
     status: OpportunityStatus
     research_summary: str | None
+    # M3.3: free-text Opportunity Evaluation ("Critic") memo -- decision
+    # support, never approval/spend authorization. See Opportunity.critic_summary.
+    critic_summary: str | None
     claims: list[DossierClaimGroup]
 
 
@@ -291,6 +294,7 @@ def get_opportunity_dossier(opportunity_id: int, db: Session = Depends(get_db)):
         thesis=opportunity.thesis,
         status=opportunity.status,
         research_summary=opportunity.research_summary,
+        critic_summary=opportunity.critic_summary,
         claims=[DossierClaimGroup(**groups[key]) for key in group_order],
     )
 

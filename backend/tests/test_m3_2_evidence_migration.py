@@ -96,17 +96,23 @@ def test_opportunity_gains_nullable_research_summary(migrated_db):
 
 
 def test_downgrade_removes_only_m3_2_columns(migrated_db):
-    """Downgrading two steps (this migration, 9147d90b16c5, plus the later
-    a943ce8ca51f confidence-nullable migration LEAD added on top of it --
-    the fixture upgrades to "head", not to this revision specifically)
-    should drop the new columns/FK/index and leave every other column on
-    evidence/opportunities untouched."""
+    """Isolates this migration's own effect (9147d90b16c5 -> 6b1c524e1012),
+    independent of how many later revisions the fixture's "head" now
+    includes on top of it (confidence-nullable, M3.3 critic_summary, ...):
+    first bring the DB down to 9147d90b16c5 itself -- undoing only later
+    migrations -- snapshot columns there, then step back exactly one more
+    revision to 6b1c524e1012 and diff. A relative "-N" offset from head, or
+    a single downgrade straight from head to 6b1c524e1012, would instead
+    conflate this migration's columns with every later migration's columns
+    undone along the way."""
     engine, cfg = migrated_db
+
+    command.downgrade(cfg, "9147d90b16c5")
     inspector = inspect(engine)
     evidence_columns_before = {c["name"] for c in inspector.get_columns("evidence")}
     opportunity_columns_before = {c["name"] for c in inspector.get_columns("opportunities")}
 
-    command.downgrade(cfg, "-2")
+    command.downgrade(cfg, "6b1c524e1012")
 
     inspector = inspect(engine)
     evidence_columns_after = {c["name"] for c in inspector.get_columns("evidence")}

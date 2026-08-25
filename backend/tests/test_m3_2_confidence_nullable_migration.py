@@ -96,7 +96,12 @@ def test_downgrade_backfills_null_confidence_before_restoring_not_null(migrated_
     finally:
         db.close()
 
-    command.downgrade(cfg, "-1")
+    # Target this migration's own down_revision explicitly rather than the
+    # relative offset "-1": relative offsets are counted from whatever the
+    # current head happens to be, which drifts every time a later BUILDER
+    # slice (e.g. M3.3's critic_summary migration) chains a new revision on
+    # top of this one. An explicit revision id stays correct regardless.
+    command.downgrade(cfg, "9147d90b16c5")
 
     inspector = inspect(engine)
     columns = {c["name"]: c for c in inspector.get_columns("evidence")}
