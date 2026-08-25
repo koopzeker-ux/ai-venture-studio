@@ -1,5 +1,138 @@
 # Current State
 
+## Milestone M3.2 — COMPLETE (2026-08-25)
+"Researcher" — the smallest possible vertical slice of the "Opportunity
+Research & Prioritization Engine": one bounded, evidence-backed deep-dive
+on exactly one existing Opportunity (`dispatch_research()`), producing a
+dossier a human reviews before any TEST/WATCH/REJECT decision. No batch,
+no scheduler, no auto-rerun, no Critic agent, no economics engine, no
+Telegram automation, no M4 Task/ClaudeCodeAdapter dispatch.
+
+**Integrated:**
+- `agent/intelligence` (`a118f9a`): `run_researcher.py` — headless `claude
+  -p ... --output-format json --permission-mode dontAsk --allowedTools
+  WebSearch WebFetch --safe-mode` (no `--worktree`, no `--bare`, no
+  Edit/Write/Bash), tolerant-but-not-fail-open JSON parsing, one atomic
+  persistence transaction (Evidence + duplicate links +
+  `Opportunity.research_summary`), one `AgentRun` per dispatch. Evidence
+  schema extended (`claim_type`/`stance`/`found_at`/`source_reliability`/
+  `duplicate_of_evidence_id` + `Opportunity.research_summary`, migration
+  `9147d90b16c5`, all nullable/additive).
+- **LEAD pre-review round** (`4ea534a`): confirmed `--max-budget-usd`
+  supported by the installed CLI (`--help`: "only works with --print") and
+  added `--max-budget-usd 2.00` as a module constant baked into the argv
+  builder, not a function parameter — no caller can raise/lower/omit it.
+  Also fixed: `usage` wasn't whitelisted (unlike M4.2's own
+  `_sanitize_usage`); `session_id`/claim/source/source_url/research_summary
+  weren't redacted before persistence despite being untrusted web content.
+- `agent/reviewer` (`2188613`): 86 independent adversarial tests, no
+  production code. Found the **MEDIUM** confidence-honesty gap (below) plus
+  2 LOW findings (cross-opportunity duplicate risk for manual/legacy writes
+  only — the Researcher's own batch-scoped resolver already can't produce
+  this; AgentRun double-DB-failure edge case, only reachable under a total
+  outage) and confirmed, not as bugs but as documented scope: the
+  hallucination-defense prompt rules (no fake sources, active
+  counter-evidence search, no smuggled TEST/WATCH/REJECT) are enforced by
+  the prompt only, not technically — an LLM-critic pass is out of M3.2's
+  scope by design.
+- **LEAD findings-decision round** (`a5e9e14`): `Evidence.confidence` made
+  **nullable** (migration `a943ce8ca51f`, additive `DROP NOT NULL`, no
+  writer relied on the old implicit 0.5 default) so "not assessed" is a
+  real `NULL`, not indistinguishable from a genuine 0.5 — the smallest
+  correct fix REVIEWER's finding asked for. Other two findings documented,
+  not fixed (CLAUDE.md §15): duplicate-scoping proven already safe for the
+  Researcher's own writes; double-DB-failure accepted as an
+  outage-only limitation.
+- **Live dogfood, attempt 1** (2026-08-23, Opportunity #21): a real, paid
+  195s WebSearch/WebFetch call completed, then failed at persistence —
+  `Evidence.source` is DB `String(120)`, the parser only capped it at
+  `max_len=500`. Rollback worked correctly (no half-written dossier,
+  `AgentRun id=3` `success=False` logged) but the real USD cost of that
+  completed call was never captured anywhere (the failure branch didn't
+  log `total_cost_usd`/`usage`). `AgentRun id=3` kept exactly as-is —
+  audit history, never rewritten.
+- **LEAD live-failure fix round** (`09a7659`): `source` now capped via
+  `_cap_source_for_db()`, whose limit is read live off
+  `Evidence.__table__.columns["source"].type.length` rather than a second
+  hardcoded number — redacts secrets first, truncates to fit the real
+  column second, logs an anomaly rather than failing silently or crashing.
+  Audited every other Researcher-written field against its real column
+  (only `source` had both a bounded column and free-text model content).
+  All three `dispatch_research()` failure branches now preserve known
+  `total_cost_usd`/`usage` via `_cost_note()` — never fabricated when
+  truly unknown (pre-model failures). Diagnostic text switched from the
+  full raw SQLAlchemy exception (which included the complete SQL + every
+  bound parameter) to exception-type + a short, sanitized first line.
+- `agent/reviewer` re-review (`83b96bd`, merge `826e34e`): 41 independent
+  tests — full boundary sweep (0/119/120/121/5000 chars), unicode/emoji
+  truncation correctness, a secret straddling both truncation boundaries,
+  an empirical proof that SQLite alone would never have caught the
+  original bug (only Postgres enforces `VARCHAR(n)`), flush-failure (not
+  just commit-failure) cost preservation, and AgentRun audit-history
+  immutability. No new findings.
+- **Live dogfood, attempt 2** (2026-08-25, Opportunity #21, same
+  opportunity reused) — **succeeded end-to-end**: `AgentRun id=4`,
+  `success=True`, real cost `$0.3988726` (well under the $2 cap), 16 new
+  Evidence rows (11 SUPPORTS / 5 CONTRADICTS / 0 unspecified / 3
+  duplicates), 4 `source` values safely truncated with an anomaly logged
+  (no DB failure this time — the fix worked in production). Full 8-section
+  `research_summary` persisted (5304 chars), including a genuinely
+  substantive "why NOT to test this" section (cites Alphabet's accelerating
+  Search revenue and Gartner's failed 25%-decline prediction directly
+  against the opportunity's own "dying" framing).
+- Full backend suite: 465 -> 551 (REVIEWER) -> 555 (confidence-nullable
+  fix) -> 570 (LEAD live-failure fix) -> 611 (REVIEWER re-review), stable
+  across repeated runs.
+
+**Human verification of the live attempt 2 dossier (2026-08-25, LEAD,
+read-only, no DB writes):** every one of the 15 sourced Evidence rows'
+`source_url` opened directly. 8 **VERIFIED** (source exists, is the stated
+source, and directly supports the stored claim at the stated precision —
+e.g. the First Page Sage Q2 2026 market-share figures matched to the
+decimal point). 7 **PARTIALLY_VERIFIED** — the source is real and
+topically on-point, but the stored claim blends a confirmed figure with
+1-2 adjacent details the fetched page did not actually contain (e.g. a
+Perplexity ARR claim citing `$450M in March 2026`, where the source page
+instead states `$148M ARR in 2025`; an Alphabet-earnings claim's specific
+`$81.6B/14.5%` ad-revenue figure not present on the cited page; a Reddit-
+growth claim whose "Google developer-conference acknowledgment" and
+"data-licensing deal" details weren't found on the one URL cited for it).
+0 **NOT_VERIFIED**, 0 **BROKEN_SOURCE** — one Gartner press-release fetch
+returned 403, but the Researcher itself had already disclosed this
+verbatim in the `source` field text rather than hiding it, and the claim
+is independently cross-corroborated by a different, fully-fetchable
+source. 1 row correctly left `UNKNOWN`/no `source_url` rather than
+fabricated (an aggregated statistic the Researcher could not trace to a
+primary source) — and the `research_summary`'s own "Key unknowns" section
+flags that exact same row as unverifiable, unprompted.
+**Finding, not fixed this round:** `independently_confirmed` was `false`
+for all 16 rows despite genuinely well-corroborated evidence (e.g. two
+independent primary sources both evidencing users routing around Google
+search) — because the mechanism requires an exact normalized-claim-text
+match, and a real LLM researcher phrases each extracted data point in its
+own words, it essentially never fires on real output. Model-reported
+independent confirmations: 0. Strict human-verified: 0 (no two rows assert
+the literal same claim from different primary sources); loosely, 1-2
+thematic clusters exist if the bar is "supports the same broader
+narrative" rather than "same claim." Not fixed — a structural limitation
+of the current exact-match design, not a fabrication risk, left for a
+future milestone.
+**Commercial information value:** materially positive — before this run,
+Opportunity #21 was one unverified HN headline; after, a human reviewer
+has a narrowed, more defensible problem framing (spam-heavy
+comparison/review/health search, not "Google is dying" generally), real
+named competitors with real numbers (Kagi ~profitable/2024, Perplexity
+~$656M 2026 ARR), a real antitrust-remedy angle, and a red-team argument
+strong enough to plausibly justify NOT testing the opportunity in its
+original framing — at $0.40 for a dossier that took a human reviewer
+roughly the length of this write-up to independently spot-check.
+
+No new dependency, no new provider, no schema change beyond the two
+additive migrations above, no scheduler/batch/auto-rerun, no economics
+engine, no Critic agent, no Telegram automation, no autonomous TEST/WATCH/
+REJECT decision — M3.3 (Critic + automatic Evidence Confidence + Telegram
+gate) not started.
+
 ## Milestone M4.2 — COMPLETE (2026-08-23)
 "One Local Worker" — the orchestrator can now automatically start, control,
 and safely persist the result of one real, local Claude Code worker

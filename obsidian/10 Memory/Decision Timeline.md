@@ -227,3 +227,47 @@
   multi-worker concurrency, no reviewer/fix-loop, no auto-merge/push — the
   bounded fix-loop and Integrator are M4.3/M4.4, not started. Full detail
   in `09 Operations/Current State.md`. Approved by project owner.
+- 2026-08-25: Milestone M3.2 ("Researcher") marked COMPLETE. Why: the one
+  live Researcher run this milestone's approved €2-equivalent budget
+  allowed (Opportunity #21, "Google Search Is Dying") succeeded end-to-end
+  — real cost $0.3988726, 16 evidence-backed rows persisted, a substantive
+  8-section dossier including a genuine red-team argument against testing
+  the opportunity as originally framed — and LEAD independently opened
+  every one of the 15 sourced Evidence rows' URLs by hand rather than
+  trusting the technical success alone: 8 fully VERIFIED, 7
+  PARTIALLY_VERIFIED (real, on-topic sources whose claims blend a confirmed
+  figure with 1-2 adjacent details not actually found on that page — e.g. a
+  Perplexity ARR figure the cited page didn't contain), 0 NOT_VERIFIED, 0
+  BROKEN_SOURCE, and one statistic the Researcher itself correctly left
+  UNKNOWN rather than inventing a source for. Getting here took two live
+  attempts and two LEAD/REVIEWER rounds on real production bugs, not just
+  design review: attempt 1 (2026-08-23) completed a real paid model call
+  and then failed at persistence — `Evidence.source` is a DB `String(120)`
+  column, the parser only capped it at 500, a mismatch introduced in an
+  earlier LEAD round that never checked the actual column length; the
+  transaction rolled back correctly (no half-written dossier), but the
+  completed call's real USD cost was never logged anywhere, only the
+  failure. Fixed (`09a7659`, re-reviewed clean by REVIEWER at `826e34e`):
+  the source cap is now read live off the actual SQLAlchemy column
+  (`Evidence.__table__.columns["source"].type.length`) instead of a second
+  hardcoded number, and known cost/usage now survives into all three
+  `dispatch_research()` failure branches. Separately, REVIEWER's own
+  adversarial round found `Evidence.confidence`'s non-nullable Float
+  default (0.5) made a genuinely-estimated 0.5 indistinguishable from "the
+  researcher declined to estimate" once persisted — LEAD's decision
+  (`a5e9e14`) was the smallest correct fix: make the column nullable
+  (migration `a943ce8ca51f`, additive, no writer relied on the old
+  default) rather than build any compensating architecture. One finding
+  deliberately left open, not fixed: `independently_confirmed` read `false`
+  for every row in the successful live run even where evidence was
+  genuinely well-corroborated from independent primary sources, because the
+  mechanism requires an exact normalized-claim-text match and a real LLM
+  researcher phrases each extracted point in its own words — a structural
+  limitation of the current design, not a fabrication risk, left for a
+  future milestone rather than patched under time pressure to force a
+  cleaner number. Full backend suite: 465 -> 611 across the milestone (see
+  `09 Operations/Current State.md` for the exact per-round counts). No new
+  provider, no new dependency, no economics engine, no Critic agent, no
+  Telegram automation, no autonomous TEST/WATCH/REJECT decision — M3.2
+  produces a dossier for human review, nothing more; M3.3 not started.
+  Approved by project owner.
