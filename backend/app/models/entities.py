@@ -134,7 +134,18 @@ class Experiment(Base):
     hypothesis: Mapped[str] = mapped_column(Text)
     critical_assumption: Mapped[str] = mapped_column(Text)
     cheapest_test: Mapped[str] = mapped_column(Text)
-    budget_eur: Mapped[float] = mapped_column(Float, default=0.0)
+    # LEAD decision (M3.3 pre-review): was non-nullable with a Python-level
+    # default=0.0, which the M3.3 Critic slice could not use honestly --
+    # when it cannot responsibly estimate a budget, 0.0 would read as "free
+    # to run" (UNKNOWN != 0 is a governing rule of this codebase, see
+    # Evidence.confidence's identical M3.2 precedent). Made nullable via
+    # Alembic revision 9b9043140432 (additive DROP NOT NULL) -- objectively
+    # safe: this table had zero
+    # writers/readers anywhere in the app before this slice, and zero rows
+    # in the live database, so no existing data or code path relies on the
+    # old default. NULL now means "not estimated", never a stand-in for a
+    # real number.
+    budget_eur: Mapped[float | None] = mapped_column(Float)
     success_criteria: Mapped[str] = mapped_column(Text)
     stop_criteria: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(50), default="proposed")

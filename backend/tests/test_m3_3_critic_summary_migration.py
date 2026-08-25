@@ -133,7 +133,14 @@ def test_downgrade_drops_only_critic_summary(migrated_db):
     finally:
         db.close()
 
-    command.downgrade(cfg, "-1")
+    # Target this migration's own down_revision explicitly rather than the
+    # relative offset "-1": relative offsets are counted from whatever the
+    # current head happens to be, which drifts every time a later slice
+    # (e.g. M3.3's own budget_eur-nullable migration, 9b9043140432) chains a
+    # new revision on top of this one. An explicit revision id stays correct
+    # regardless -- see the identical fix already applied to
+    # test_m3_2_evidence_migration.py / test_m3_2_confidence_nullable_migration.py.
+    command.downgrade(cfg, "a943ce8ca51f")
 
     inspector = inspect(engine)
     columns = {c["name"]: c for c in inspector.get_columns("opportunities")}

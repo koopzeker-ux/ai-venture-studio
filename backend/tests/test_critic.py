@@ -24,13 +24,16 @@ from app.evaluation.run_critic import (
     DIMENSION_KEYS,
     DIMENSION_WEIGHTS,
     MAX_BUDGET_USD,
+    RATING_LEVELS,
     OpportunityNotFoundError,
     ResearchNotYetDoneError,
     _build_critic_prompt,
     _compute_evidence_confidence,
     _coerce_budget_eur,
+    _coerce_rating,
     _determine_recommendation,
     _is_concrete_text,
+    _points_for_dimension,
     _score_from_dimensions,
     _validate_evidence_refs,
     build_critic_argv,
@@ -83,8 +86,14 @@ def _make_evidence(db_session, opportunity_id, **overrides) -> Evidence:
     return e
 
 
-def _dim(confidence="HIGH", refs=None, assessment="assessment text"):
-    return {"assessment": assessment, "evidence_refs": refs or [], "confidence": confidence}
+def _dim(confidence="HIGH", refs=None, assessment="assessment text", rating="POSITIVE"):
+    # LEAD fix (M3.3 pre-review, CRITICAL): rating defaults to POSITIVE so
+    # every existing test that only varied `confidence` keeps its original,
+    # numerically identical scoring behavior (POSITIVE+HIGH/MEDIUM/LOW
+    # reproduces the pre-fix HIGH/MEDIUM/LOW points exactly) -- the new
+    # rating axis is exercised by dedicated tests below, not by changing
+    # what every other test implicitly means.
+    return {"assessment": assessment, "evidence_refs": refs or [], "rating": rating, "confidence": confidence}
 
 
 def _full_payload_json(
@@ -92,8 +101,9 @@ def _full_payload_json(
     cheapest_test="run a landing page test for two weeks with paid ads",
     stop_criteria="stop after two weeks if conversion is below 2%",
     budget_eur=150.0,
+    dim_rating="POSITIVE",
 ) -> dict:
-    payload = {k: _dim(dim_confidence, dim_refs) for k in DIMENSION_KEYS}
+    payload = {k: _dim(dim_confidence, dim_refs, rating=dim_rating) for k in DIMENSION_KEYS}
     payload["economics"] = {"assessment": "x", "known": ["a"], "unknown": ["b"]}
     payload["red_team"] = {
         "strongest_case_against": ["x"], "fatal_risks": fatal_risks or [], "missing_evidence": ["y"],
@@ -320,6 +330,127 @@ def test_F_all_unknown_gives_zero_coverage_and_zero_score_not_a_crash():
     score, coverage, _ = _score_from_dimensions(payload.dimensions)
     assert score == 0.0
     assert coverage == 0.0
+
+
+# ===========================================================================
+# LEAD fix (M3.3 pre-review, CRITICAL): rating (commercial direction) is
+# structurally separate from confidence (evidence certainty) -- a
+# confidently-assessed NEGATIVE dimension must score like bad news, not like
+# good news, regardless of how sure the model is.
+# ===========================================================================
+
+def test_confidently_negative_assessment_scores_zero_not_nine():
+    """The exact scenario this fix guards against: 'competition' assessed
+    with HIGH confidence that the market is brutally saturated with no
+    viable wedge -- rating=NEGATIVE, confidence=HIGH. Must score 0/10 for
+    that dimension, never the 9/10 a pre-fix confidence-only formula would
+    have awarded."""
+    payload_json = _full_payload_json(dim_confidence="HIGH", dim_refs=[1], dim_rating="POSITIVE")
+    payload_json["competition"] = _dim(
+        confidence="HIGH", refs=[1], rating="NEGATIVE",
+        assessment="Market is brutally saturated and incumbents dominate; no viable wedge.",
+    )
+    payload = parse_critic_payload(json.dumps(payload_json))
+    _validate_evidence_refs(payload.dimensions, valid_ids={1}, anomalies=payload.anomalies)
+    score, coverage, breakdown = _score_from_dimensions(payload.dimensions)
+    assert breakdown["competition"]["included_in_score"] is True  # a known-bad assessment still counts toward coverage
+    assert breakdown["competition"]["points_of_10"] == 0.0
+    # High confidence in bad news is not good news for the overall score
+    # either -- removing 10 of 100 weight's worth of points (competition's
+    # own weight) from an otherwise-all-POSITIVE-HIGH payload must lower
+    # the score measurably, not leave it untouched.
+    all_positive_score, _, _ = _score_from_dimensions(
+        parse_critic_payload(json.dumps(_full_payload_json(dim_confidence="HIGH", dim_refs=[1]))).dimensions
+    )
+    assert score < all_positive_score
+
+
+def test_confidently_positive_assessment_still_scores_nine_control_case():
+    payload_json = _full_payload_json(dim_confidence="HIGH", dim_refs=[1], dim_rating="POSITIVE")
+    payload = parse_critic_payload(json.dumps(payload_json))
+    _validate_evidence_refs(payload.dimensions, valid_ids={1}, anomalies=payload.anomalies)
+    _, _, breakdown = _score_from_dimensions(payload.dimensions)
+    assert breakdown["competition"]["points_of_10"] == 9.0
+
+
+def test_weak_low_confidence_negative_still_scores_zero_never_positive():
+    """Confidence never rescues a NEGATIVE rating into positive points --
+    only rating=POSITIVE is confidence-scaled at all."""
+    payload_json = _full_payload_json(dim_confidence="HIGH", dim_refs=[1])
+    payload_json["buying_intent"] = _dim(confidence="LOW", refs=[], rating="NEGATIVE")
+    payload = parse_critic_payload(json.dumps(payload_json))
+    _validate_evidence_refs(payload.dimensions, valid_ids={1}, anomalies=payload.anomalies)
+    _, _, breakdown = _score_from_dimensions(payload.dimensions)
+    assert breakdown["buying_intent"]["points_of_10"] == 0.0
+
+
+def test_neutral_rating_scores_fixed_midpoint_regardless_of_confidence():
+    for confidence in ("HIGH", "MEDIUM", "LOW"):
+        payload_json = _full_payload_json(dim_confidence="HIGH", dim_refs=[1])
+        payload_json["market_gap"] = _dim(confidence=confidence, refs=[1], rating="NEUTRAL")
+        payload = parse_critic_payload(json.dumps(payload_json))
+        _validate_evidence_refs(payload.dimensions, valid_ids={1}, anomalies=payload.anomalies)
+        _, _, breakdown = _score_from_dimensions(payload.dimensions)
+        assert breakdown["market_gap"]["points_of_10"] == 5.0, confidence
+
+
+def test_unknown_rating_excludes_dimension_even_with_high_confidence():
+    """A dimension cannot be scored on confidence alone -- rating must also
+    be known. UNKNOWN rating (direction genuinely couldn't be judged) with
+    HIGH confidence must still be excluded from score/coverage, not scored
+    as if positive."""
+    payload_json = _full_payload_json(dim_confidence="HIGH", dim_refs=[1])
+    payload_json["creative_potential"] = _dim(confidence="HIGH", refs=[1], rating="UNKNOWN")
+    payload = parse_critic_payload(json.dumps(payload_json))
+    _validate_evidence_refs(payload.dimensions, valid_ids={1}, anomalies=payload.anomalies)
+    _, _, breakdown = _score_from_dimensions(payload.dimensions)
+    assert breakdown["creative_potential"]["included_in_score"] is False
+
+
+def test_invalid_rating_value_coerced_to_unknown_with_anomaly():
+    payload_json = _full_payload_json(dim_confidence="HIGH", dim_refs=[1])
+    payload_json["retention_potential"]["rating"] = "SORT_OF_GOOD_MAYBE"
+    payload = parse_critic_payload(json.dumps(payload_json))
+    assert payload.dimensions["retention_potential"].rating == "UNKNOWN"
+    assert any("invalid/missing rating" in a for a in payload.anomalies)
+
+
+def test_missing_rating_field_coerced_to_unknown_not_assumed_positive():
+    payload_json = _full_payload_json(dim_confidence="HIGH", dim_refs=[1])
+    del payload_json["customer_pain"]["rating"]
+    payload = parse_critic_payload(json.dumps(payload_json))
+    assert payload.dimensions["customer_pain"].rating == "UNKNOWN"
+
+
+def test_points_for_dimension_unit_matrix():
+    assert _points_for_dimension("POSITIVE", "HIGH") == 9.0
+    assert _points_for_dimension("POSITIVE", "MEDIUM") == 6.0
+    assert _points_for_dimension("POSITIVE", "LOW") == 3.0
+    assert _points_for_dimension("NEUTRAL", "HIGH") == 5.0
+    assert _points_for_dimension("NEUTRAL", "LOW") == 5.0
+    assert _points_for_dimension("NEGATIVE", "HIGH") == 0.0
+    assert _points_for_dimension("NEGATIVE", "LOW") == 0.0
+    assert _points_for_dimension("UNKNOWN", "HIGH") is None
+    assert _points_for_dimension("POSITIVE", "UNKNOWN") is None
+    assert _points_for_dimension("UNKNOWN", "UNKNOWN") is None
+
+
+def test_coerce_rating_valid_and_invalid():
+    anomalies = []
+    assert _coerce_rating("NEGATIVE", anomalies, "x") == "NEGATIVE"
+    assert anomalies == []
+    assert _coerce_rating("bogus", anomalies, "x") == "UNKNOWN"
+    assert anomalies
+    assert _coerce_rating(None, [], "x") == "UNKNOWN"
+
+
+def test_prompt_explicitly_separates_rating_from_confidence(db_session=None):
+    from app.models.entities import Opportunity as OpportunityModel
+    opp = OpportunityModel(slug="x", title="T", thesis="Thesis", research_summary="summary")
+    prompt = _build_critic_prompt(opp, [])
+    assert "rating" in prompt and "confidence" in prompt
+    assert "TWO SEPARATE JUDGMENTS" in prompt
+    assert "confidence in bad news is still real confidence" in prompt
 
 
 def test_budget_eur_unknown_never_becomes_fabricated_zero_in_dataclass():
@@ -620,6 +751,41 @@ def test_P_test_creates_exactly_one_proposed_experiment(db_session):
     assert len(experiments) == 1
     assert experiments[0].status == "proposed"
     assert experiments[0].hypothesis == "people will pay for X"
+
+
+def test_unestimated_budget_persists_as_real_null_not_fabricated_zero(db_session):
+    """LEAD fix (M3.3 pre-review): Experiment.budget_eur is nullable
+    (Alembic 9b9043140432) -- when the Critic could not responsibly
+    estimate a budget, the proposed Experiment row must store a real NULL,
+    never a 0.0 placeholder that could be misread as 'free to run'."""
+    opp = _make_opportunity(db_session)
+    for i in range(1, 5):
+        _make_evidence(db_session, opp.id, id=i, independently_confirmed=(i <= 2))
+
+    dispatch_critic(
+        db_session, opp.id, repo_path="/fake",
+        run_critic_fn=lambda **kw: _ok_worker_result(
+            _full_payload_json(dim_confidence="HIGH", dim_refs=[1, 2, 3, 4], budget_eur=None)
+        ),
+    )
+    experiments = db_session.scalars(select(Experiment).where(Experiment.opportunity_id == opp.id)).all()
+    assert len(experiments) == 1
+    assert experiments[0].budget_eur is None
+
+
+def test_known_budget_still_persists_correctly(db_session):
+    opp = _make_opportunity(db_session)
+    for i in range(1, 5):
+        _make_evidence(db_session, opp.id, id=i, independently_confirmed=(i <= 2))
+
+    dispatch_critic(
+        db_session, opp.id, repo_path="/fake",
+        run_critic_fn=lambda **kw: _ok_worker_result(
+            _full_payload_json(dim_confidence="HIGH", dim_refs=[1, 2, 3, 4], budget_eur=250.0)
+        ),
+    )
+    experiments = db_session.scalars(select(Experiment).where(Experiment.opportunity_id == opp.id)).all()
+    assert experiments[0].budget_eur == 250.0
 
 
 def test_Q_watch_creates_no_experiment(db_session):
