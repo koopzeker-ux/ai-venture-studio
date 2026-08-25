@@ -66,6 +66,39 @@ CLAIM_TYPES = frozenset({"FACT", "INFERENCE", "ESTIMATE", "UNKNOWN"})
 STANCES = frozenset({"SUPPORTS", "CONTRADICTS"})
 SOURCE_RELIABILITIES = frozenset({"HIGH", "MEDIUM", "LOW", "UNKNOWN"})
 
+# LEAD fix (M3.2 live-dogfood finding, root cause 1): a real live run
+# (2026-08-23, Opportunity #21) failed persistence with
+# StringDataRightTruncation -- the researcher's `source` value was longer
+# than Evidence.source's DB column (String(120)), but the parser only
+# capped it at max_len=500 (a mismatch introduced in an earlier LEAD
+# round that never checked the actual column length). Derived directly
+# from the live SQLAlchemy column definition rather than a second
+# hardcoded constant, so this cannot silently drift out of sync again if
+# the column length ever changes. `claim`/`source_url`/`research_summary`
+# are Text (unbounded) and `claim_type`/`stance`/`source_reliability` are
+# enum-validated against a fixed short vocabulary -- `source` is the only
+# Researcher-persisted field with a DB length shorter than its parser cap.
+_SOURCE_DB_MAX_LEN: int = Evidence.__table__.columns["source"].type.length
+
+
+def _cap_source_for_db(source: str, anomalies: list[str], idx: int) -> str:
+    """Redact secret-shaped substrings first (no length cap yet, so
+    redaction can't itself be truncated mid-pattern), then hard-truncate to
+    fit Evidence.source's actual DB column -- never merely capped to a
+    parser-chosen number that could still exceed the column and raise
+    StringDataRightTruncation at INSERT time, well after the paid model
+    call already happened. A truncation is recorded as an anomaly rather
+    than silently accepted; source_url is untouched by this (own,
+    unbounded-Text, cap)."""
+    redacted = sanitize_text(source, max_len=2000) or ""
+    if len(redacted) > _SOURCE_DB_MAX_LEN:
+        anomalies.append(
+            f"evidence[{idx}] source truncated to {_SOURCE_DB_MAX_LEN} chars to fit the DB column"
+        )
+        return redacted[:_SOURCE_DB_MAX_LEN]
+    return redacted
+
+
 # LEAD decision (M3.2 REVIEWER finding 1, MEDIUM, superseding the earlier
 # INTELLIGENCE-round approach): Evidence.confidence is now a nullable Float
 # (Alembic revision a943ce8ca51f) with no fallback value at all -- a
@@ -432,7 +465,7 @@ def parse_research_payload(result_text: str) -> ResearchPayload:
                 claim=sanitize_text(claim.strip(), max_len=4000) or "",
                 claim_type=claim_type,
                 stance=stance,
-                source=sanitize_text(source.strip(), max_len=500) or "",
+                source=_cap_source_for_db(source.strip(), entry_anomalies, idx),
                 source_url=source_url,
                 found_at=found_at,
                 source_reliability=source_reliability,
@@ -545,6 +578,43 @@ def _build_output_summary(
     if anomalies:
         parts.append(f"anomalies={len(anomalies)}: " + "; ".join(anomalies[:20]))
     return sanitize_text(", ".join(parts), max_len=4000) or ""
+
+
+def _cost_note(worker_result: WorkerResult) -> str:
+    """LEAD fix (M3.2 live-dogfood finding, root cause 2): a real live run
+    completed a paid model call and then failed at persistence -- the
+    known cost/usage from that already-completed call was never logged
+    anywhere, only the failure detail. This is deliberately best-effort:
+    only includes total_cost_usd/usage when the worker actually reported
+    them (e.g. present even on a nonzero_exit failure, since the outer
+    JSON envelope -- and its cost figure -- can still have parsed
+    successfully before the failure). Never fabricates a 0 or an estimate
+    when the model call itself never produced this data (timeout,
+    spawn_error, invalid outer JSON). usage is already whitelisted by
+    run_researcher() before it ever reaches a WorkerResult, so it is not
+    re-sanitized here."""
+    parts = []
+    if worker_result.total_cost_usd is not None:
+        parts.append(f"cost_usd_estimate={worker_result.total_cost_usd}")
+    if worker_result.usage:
+        parts.append(f"usage={worker_result.usage}")
+    return (", " + ", ".join(parts)) if parts else ""
+
+
+def _short_exception_detail(exc: Exception, max_len: int = 300) -> str:
+    """LEAD fix (M3.2 live-dogfood finding, diagnostics): structural
+    failure metadata (the exception's own type name) plus a short,
+    sanitized excerpt -- never the full raw exception. For a
+    SQLAlchemy/DBAPI error, str(exc) includes the complete compiled SQL
+    statement and every bound parameter (i.e. potentially the full text of
+    every scraped claim/source/source_url in the batch, not just a stack
+    trace), which is both why the previous generic sanitize_text(...,
+    max_len=2000) cap silently ate the useful diagnostic detail (which
+    field/value actually overflowed) and its own minor over-exposure risk.
+    Takes only the exception's first line before applying the normal
+    secret-redaction + hard length cap."""
+    first_line = str(exc).splitlines()[0] if str(exc) else ""
+    return f"{type(exc).__name__}: {sanitize_text(first_line, max_len=max_len)}"
 
 
 def _build_research_prompt(opportunity: Opportunity) -> str:
@@ -696,7 +766,9 @@ def dispatch_research(
         detail = worker_result.error_detail or f"researcher attempt failed ({worker_result.error_kind})"
         return _log_agent_run(
             db, input_summary=input_summary,
-            output_summary=sanitize_text(f"research run failed ({worker_result.error_kind}): {detail}"),
+            output_summary=sanitize_text(
+                f"research run failed ({worker_result.error_kind}): {detail}{_cost_note(worker_result)}"
+            ),
             model="claude-code", success=False,
         )
 
@@ -705,7 +777,9 @@ def dispatch_research(
     except ResearchPayloadError as exc:
         return _log_agent_run(
             db, input_summary=input_summary,
-            output_summary=sanitize_text(f"research run failed (unusable_payload): {exc}"),
+            output_summary=sanitize_text(
+                f"research run failed (unusable_payload): {exc}{_cost_note(worker_result)}"
+            ),
             model="claude-code", success=False,
         )
 
@@ -765,7 +839,9 @@ def dispatch_research(
         db.rollback()
         return _log_agent_run(
             db, input_summary=input_summary,
-            output_summary=sanitize_text(f"research run failed (persistence_error): {exc}"),
+            output_summary=sanitize_text(
+                f"research run failed (persistence_error): {_short_exception_detail(exc)}{_cost_note(worker_result)}"
+            ),
             model="claude-code", success=False,
         )
 

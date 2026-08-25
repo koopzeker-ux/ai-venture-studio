@@ -27,7 +27,10 @@ from app.research.run_researcher import (
     ResearchPayloadError,
     _build_research_prompt,
     _compute_independently_confirmed,
+    _cost_note,
     _resolve_duplicate_refs,
+    _SOURCE_DB_MAX_LEN,
+    _short_exception_detail,
     _validate_research_tools,
     build_research_argv,
     dispatch_research,
@@ -788,6 +791,249 @@ def test_long_research_summary_is_not_truncated_by_default_sanitize_max_len():
     result = parse_research_payload(payload)
     assert result.research_summary == long_summary.strip()
     assert "[truncated]" not in result.research_summary
+
+
+# ---------------------------------------------------------------------------
+# LEAD fix (M3.2 live-dogfood finding, root cause 1): Evidence.source is a
+# DB String(120) column -- a real live run failed persistence with
+# StringDataRightTruncation because the parser only capped `source` at
+# max_len=500. _SOURCE_DB_MAX_LEN is derived directly from the live
+# SQLAlchemy column so it cannot drift out of sync again.
+# ---------------------------------------------------------------------------
+
+def test_source_db_max_len_matches_the_real_evidence_column():
+    assert _SOURCE_DB_MAX_LEN == 120
+
+
+def test_all_researcher_string_fields_respect_their_actual_db_column_length():
+    """Systemic regression guard, not just for `source`: every
+    Researcher-persisted string field must never be able to exceed its
+    actual DB column length. Enum-validated fields (claim_type/stance/
+    source_reliability) are checked against their fixed vocabulary rather
+    than a parser cap, since their values are never free text derived from
+    model output. claim/source_url/research_summary map to Text columns
+    (no DB-side length ceiling at all), so nothing to enforce there
+    regardless of parser cap -- source is the only field with both a real
+    DB length AND free-text model-controlled content, which is why it is
+    the only one wired to a dynamic _SOURCE_DB_MAX_LEN-style cap."""
+    from app.models.entities import Opportunity as OpportunityModel
+
+    evidence_cols = {c.name: c for c in Evidence.__table__.columns}
+    for value in ("FACT", "INFERENCE", "ESTIMATE", "UNKNOWN"):
+        assert len(value) <= evidence_cols["claim_type"].type.length
+    for value in ("SUPPORTS", "CONTRADICTS"):
+        assert len(value) <= evidence_cols["stance"].type.length
+    for value in ("HIGH", "MEDIUM", "LOW", "UNKNOWN"):
+        assert len(value) <= evidence_cols["source_reliability"].type.length
+    assert evidence_cols["claim"].type.length is None  # Text, unbounded
+    assert evidence_cols["source_url"].type.length is None  # Text, unbounded
+    assert evidence_cols["source"].type.length == _SOURCE_DB_MAX_LEN  # the one bounded, free-text field
+    assert OpportunityModel.__table__.columns["research_summary"].type.length is None  # Text, unbounded
+
+
+def test_source_exactly_at_db_limit_is_not_truncated_no_anomaly():
+    # confidence supplied explicitly so the only thing under test here is
+    # source-length behavior -- an omitted confidence is its own,
+    # separately-tested anomaly (test_14b) and would otherwise pollute this
+    # assertion.
+    source = "A" * _SOURCE_DB_MAX_LEN
+    payload = json.dumps({
+        "evidence": [{"id": "e1", "claim": "c", "source": source, "confidence": 0.6}],
+        "research_summary": "s",
+    })
+    result = parse_research_payload(payload)
+    assert result.entries[0].source == source
+    assert len(result.entries[0].source) == _SOURCE_DB_MAX_LEN
+    assert result.anomalies == []
+
+
+def test_source_over_db_limit_is_safely_truncated_with_anomaly_not_a_db_failure():
+    source = "B" * (_SOURCE_DB_MAX_LEN + 50)
+    payload = json.dumps({
+        "evidence": [{"id": "e1", "claim": "c", "source": source}],
+        "research_summary": "s",
+    })
+    result = parse_research_payload(payload)
+    assert len(result.entries[0].source) == _SOURCE_DB_MAX_LEN
+    assert any("source truncated" in a for a in result.anomalies)
+
+
+def test_source_url_untouched_by_source_length_capping():
+    long_source = "C" * 200
+    long_url = "https://example.com/" + ("d" * 300)
+    payload = json.dumps({
+        "evidence": [{"id": "e1", "claim": "c", "source": long_source, "source_url": long_url}],
+        "research_summary": "s",
+    })
+    result = parse_research_payload(payload)
+    assert len(result.entries[0].source) == _SOURCE_DB_MAX_LEN
+    assert result.entries[0].source_url == long_url  # source_url has its own, much larger cap
+
+
+def test_long_source_persists_end_to_end_without_db_failure(db_session):
+    """Reproduces the exact live-dogfood failure shape (a source string
+    longer than the DB column) through real persistence -- must succeed,
+    not raise StringDataRightTruncation-equivalent at the ORM/DB layer."""
+    opp = _make_opportunity(db_session)
+    evidence = [{
+        "id": "e1", "claim": "Real long source name",
+        "source": "A very long source description that a real researcher might plausibly write out in full, well past a hundred and twenty characters",
+        "source_url": "https://example.com/article",
+    }]
+    run = dispatch_research(
+        db_session, opp.id, repo_path="/fake",
+        run_researcher_fn=lambda **kw: _ok_worker_result(evidence, research_summary="Summary."),
+    )
+    assert run.success is True
+    row = db_session.scalars(select(Evidence).where(Evidence.opportunity_id == opp.id)).one()
+    assert len(row.source) <= _SOURCE_DB_MAX_LEN
+    assert row.source_url == "https://example.com/article"
+
+
+def test_secret_shaped_source_over_db_limit_is_both_redacted_and_capped():
+    secret = "sk-ant-api03-FAKESECRETFAKESECRETFAKESECRET123456"
+    source = f"A source mentioning a leaked key {secret} padded out well past the DB column limit " + ("x" * 60)
+    payload = json.dumps({
+        "evidence": [{"id": "e1", "claim": "c", "source": source}],
+        "research_summary": "s",
+    })
+    result = parse_research_payload(payload)
+    assert secret not in result.entries[0].source
+    assert len(result.entries[0].source) <= _SOURCE_DB_MAX_LEN
+
+
+# ---------------------------------------------------------------------------
+# LEAD fix (M3.2 live-dogfood finding, root cause 2): a paid model call that
+# completes and then fails at persistence must not lose its known
+# cost/usage -- previously only the success path logged them.
+# ---------------------------------------------------------------------------
+
+def test_cost_note_includes_known_cost_and_usage():
+    wr = WorkerResult(
+        ok=True, exit_code=0, session_id="s1", result_text="{}", usage={"input_tokens": 42},
+        total_cost_usd=1.23, is_error=False, error_kind=None, error_detail=None, stderr_excerpt=None,
+    )
+    note = _cost_note(wr)
+    assert "1.23" in note
+    assert "42" in note
+
+
+def test_cost_note_empty_when_nothing_known():
+    wr = WorkerResult(
+        ok=False, exit_code=None, session_id=None, result_text=None, usage={},
+        total_cost_usd=None, is_error=True, error_kind="timeout", error_detail="boom", stderr_excerpt=None,
+    )
+    assert _cost_note(wr) == ""  # never a fabricated 0 or estimate
+
+
+def test_persistence_failure_after_paid_model_call_preserves_cost_and_usage(db_session):
+    """Reproduces the live-dogfood scenario: a successful, paid worker
+    result (with real cost/usage) that then fails at DB persistence for an
+    unrelated reason -- the known cost/usage must survive into
+    AgentRun.output_summary, not be lost."""
+    opp = _make_opportunity(db_session)
+    evidence = [{"id": "e1", "claim": "a", "source": "s"}]
+    worker_result = _ok_worker_result(evidence, total_cost_usd=0.087, usage={"input_tokens": 900, "output_tokens": 300})
+
+    original_commit = SASession.commit
+    call_count = {"n": 0}
+
+    def failing_commit(self, *a, **kw):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("simulated persistence failure")
+        return original_commit(self, *a, **kw)
+
+    with patch.object(SASession, "commit", failing_commit):
+        run = dispatch_research(db_session, opp.id, repo_path="/fake", run_researcher_fn=lambda **kw: worker_result)
+
+    assert run.success is False
+    assert "0.087" in run.output_summary
+    assert "900" in run.output_summary and "300" in run.output_summary
+
+
+def test_unusable_payload_failure_preserves_cost_and_usage(db_session):
+    opp = _make_opportunity(db_session)
+    worker_result = WorkerResult(
+        ok=True, exit_code=0, session_id="s1", result_text="not valid json at all",
+        usage={"input_tokens": 55}, total_cost_usd=0.02, is_error=False, error_kind=None,
+        error_detail=None, stderr_excerpt=None,
+    )
+    run = dispatch_research(db_session, opp.id, repo_path="/fake", run_researcher_fn=lambda **kw: worker_result)
+    assert run.success is False
+    assert "0.02" in run.output_summary
+    assert "55" in run.output_summary
+
+
+def test_worker_not_ok_but_cost_known_still_logs_it(db_session):
+    """A nonzero_exit failure can still have a real, parsed cost figure
+    (the outer JSON envelope parsed successfully before the failure) --
+    must not be discarded just because worker_result.ok is False."""
+    opp = _make_opportunity(db_session)
+    worker_result = WorkerResult(
+        ok=False, exit_code=1, session_id="s1", result_text=None, usage={"input_tokens": 10},
+        total_cost_usd=0.15, is_error=True, error_kind="nonzero_exit", error_detail="model reported failure",
+        stderr_excerpt=None,
+    )
+    run = dispatch_research(db_session, opp.id, repo_path="/fake", run_researcher_fn=lambda **kw: worker_result)
+    assert run.success is False
+    assert "0.15" in run.output_summary
+
+
+def test_worker_failure_with_no_cost_data_never_fabricates_a_value(db_session):
+    opp = _make_opportunity(db_session)
+    run = dispatch_research(
+        db_session, opp.id, repo_path="/fake",
+        run_researcher_fn=lambda **kw: _fail_worker_result("timeout", "researcher exceeded timeout"),
+    )
+    assert run.success is False
+    assert "cost_usd_estimate" not in run.output_summary
+
+
+def test_short_exception_detail_never_includes_full_sql_or_all_parameters():
+    """Mirrors the real (multi-line) shape SQLAlchemy/DBAPI exceptions
+    actually format as -- '(errortype) message' on the first line, then
+    '[SQL: ...]' and '[parameters: ...]' each on their own following line
+    (exactly as captured verbatim in the live-dogfood AgentRun row). Only
+    the first line plus the exception's own type name should survive."""
+    fake_sql_error = Exception(
+        "(psycopg.errors.StringDataRightTruncation) value too long for type character varying(120)\n"
+        "[SQL: INSERT INTO evidence (...) SELECT p0::INTEGER, p1::VARCHAR, ...]\n"
+        "[parameters: {'source__0': 'x' * 500, 'claim__0': 'sensitive scraped claim text ' * 50}]"
+    )
+    detail = _short_exception_detail(fake_sql_error)
+    assert "StringDataRightTruncation" in detail
+    assert "[parameters:" not in detail
+    assert "[SQL:" not in detail
+    assert len(detail) < 350
+
+
+def test_persistence_error_output_summary_uses_short_diagnostic_not_raw_sql_dump(db_session):
+    opp = _make_opportunity(db_session)
+    evidence = [{"id": "e1", "claim": "a", "source": "s"}]
+    worker_result = _ok_worker_result(evidence)
+
+    original_commit = SASession.commit
+    call_count = {"n": 0}
+
+    def failing_commit(self, *a, **kw):
+        call_count["n"] += 1
+        if call_count["n"] == 1:  # only the main dossier-write commit fails
+            raise RuntimeError(
+                "value too long for type character varying(120)\n"
+                "[SQL: INSERT INTO evidence (opportunity_id, claim, source) VALUES (...)]\n"
+                "[parameters: {'claim__0': 'a' * 10000}]"
+            )
+        return original_commit(self, *a, **kw)
+
+    with patch.object(SASession, "commit", failing_commit):
+        run = dispatch_research(db_session, opp.id, repo_path="/fake", run_researcher_fn=lambda **kw: worker_result)
+
+    assert run.success is False
+    assert "RuntimeError" in run.output_summary
+    assert "value too long" in run.output_summary
+    assert "[parameters:" not in run.output_summary
+    assert len(run.output_summary) < 1000  # not the ~2000-char raw dump the old behavior produced
 
 
 def test_session_identifiers_are_bounded_not_treated_as_secret_but_stored_safely():
