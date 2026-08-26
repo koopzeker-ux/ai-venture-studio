@@ -41,13 +41,27 @@ PAIN_POINT_PHRASES = [
     # M3.4: broadened for Reddit-shaped customer-pain phrasing (CLAUDE.md
     # M3.4 task §5) -- kept to the smallest deterministic set that covers
     # the requested semantics, not one entry per example phrase.
-    "struggling with",
-    "frustrated with",
-    "hate using",
+    #
+    # LEAD fix (M3.4 pre-review, precision): "struggling with"/
+    # "frustrated with"/"hate using"/"why is there no"/"takes hours" were
+    # removed here. Adversarial testing (real, plausible non-commercial
+    # sentences) confirmed each produces a false positive that a bare
+    # substring match cannot avoid, because none require the object of the
+    # phrase to be a product/tool/service at all -- e.g. "I am struggling
+    # with my mental health", "so frustrated with this movie", "I hate
+    # using public transport", "why is there no update [to an existing
+    # app]", "this takes hours to compile" all fired pain_point_signal on
+    # the pre-fix phrase list despite having nothing to do with an
+    # underserved commercial gap. Since any single STRONG_EVIDENCE_TYPE
+    # match alone promotes a raw signal straight to a new Opportunity (no
+    # corroboration required), false positives here directly create noise
+    # Opportunities, not just noisy triage labels. "we do this manually"
+    # and "is there a tool that" are kept -- both already contain (or
+    # strongly imply) a product/workflow-tool anchor, materially lower
+    # false-positive risk in adversarial testing, and are the two BUILDER
+    # additions this milestone's own worked examples actually depend on.
     "we do this manually",
-    "why is there no",
     "is there a tool that",
-    "takes hours",
 ]
 
 PURCHASE_INTENT_PHRASES = [
@@ -56,11 +70,15 @@ PURCHASE_INTENT_PHRASES = [
     "how much does this cost",
     "is there a paid plan",
     # M3.4 addition (see PAIN_POINT_PHRASES comment above).
+    #
+    # LEAD fix (M3.4 pre-review, precision): "willing to pay" (bare,
+    # unanchored) removed -- adversarially matches "willing to pay my
+    # taxes", with zero commercial-product context required. The remaining
+    # five all retain a product/software/service noun.
     "looking for a tool",
     "looking for software",
     "where can i buy",
     "need a product that",
-    "willing to pay",
     "recommend a service for",
 ]
 
@@ -68,15 +86,27 @@ ALTERNATIVE_SEEKING_PHRASES = [
     "looking for an alternative to",
     "is there a better alternative to",
     "recommend an alternative to",
-    # M3.4 addition (see PAIN_POINT_PHRASES comment above). Bare
-    # "alternative(s) to" deliberately added -- very common real Reddit
-    # phrasing ("alternative to notion?") not covered by the anchored
-    # phrases above.
-    "alternative to",
-    "alternatives to",
-    "instead of",
-    "replacement for",
-    "switching from",
+    # M3.4 addition (see PAIN_POINT_PHRASES comment above).
+    #
+    # LEAD fix (M3.4 pre-review, precision): the bare/unanchored additions
+    # BUILDER made here -- "alternative to", "alternatives to", "instead
+    # of", "replacement for", "switching from" -- were removed after
+    # adversarial testing confirmed every one of them fires on ordinary,
+    # non-commercial English: "alternative to democracy", "what are some
+    # alternatives to war", "I walked instead of driving", "a replacement
+    # for my missing tooth", "switching from Windows [to Linux, personal
+    # preference, not a product ask]". Unlike the three original,
+    # already-anchored phrases (all require "looking for"/"is there a
+    # better"/"recommend an" as a delimiting frame -- exactly why they
+    # weren't flagged), these bare connector phrases carry no requirement
+    # that their object be a product/tool/service at all, and this
+    # category has no PAIN_POINT-style noun ("tool"/"product") to anchor
+    # on instead -- a genuine "fundamentally too broad for plain substring
+    # matching" case per this milestone's own instructions, not fixable
+    # with one or two more words. "looking to replace" is the one kept: it
+    # requires the stronger "looking to" intent-frame (closer in shape to
+    # the three originals than the others), and this milestone's own
+    # worked multi-evidence-type example depends on it.
     "looking to replace",
 ]
 

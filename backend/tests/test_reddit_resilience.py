@@ -249,6 +249,100 @@ def test_one_subreddit_failure_does_not_affect_another(monkeypatch):
     assert signals[0]["metadata"]["subreddit"] == "smallbusiness"
 
 
+# ===========================================================================
+# LEAD fix (M3.4 pre-review): REDDIT_SUBREDDITS config must never be able to
+# reshape the request path/host or crash the collector. Found via direct
+# httpx.URL construction: "?"/"#"/".." silently reshape the intended path
+# (same host, but a bogus request never reaching /new/.rss), and control
+# characters (tab/newline/NUL) raise httpx.InvalidURL -- a plain Exception,
+# NOT a subclass of httpx.RequestError, so uncaught before this fix it
+# would have crashed collect_raw_signals() entirely (HN and RSS included).
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "malicious_value",
+    [
+        "../../../etc",
+        "test?foo=bar",
+        "test#fragment",
+        "https://evil.com",
+        "test with spaces",
+        "test\ttab",
+        "test\nnewline",
+        "te\x00st",
+        "",
+        "   ",
+        "a" * 25,  # longer than Reddit's real 21-char subreddit name limit
+        "ab",  # shorter than Reddit's real 3-char minimum
+        "_startswithunderscore",
+    ],
+)
+def test_invalid_subreddit_config_values_are_rejected_no_request_made(monkeypatch, caplog, malicious_value):
+    monkeypatch.setattr(global_settings, "reddit_subreddits", malicious_value)
+    calls = []
+    monkeypatch.setattr(reddit.httpx, "get", lambda url, timeout=None: calls.append(url))
+
+    with caplog.at_level(logging.ERROR):
+        signals = reddit.fetch_recent_signals()
+
+    assert signals == []
+    assert calls == []  # no HTTP request was ever attempted for the bad value
+
+
+def test_invalid_subreddit_does_not_block_other_valid_subreddits_in_the_same_config(monkeypatch):
+    monkeypatch.setattr(global_settings, "reddit_subreddits", "test?foo=bar, smallbusiness")
+    calls = []
+
+    def fake_get(url, timeout=None):
+        calls.append(url)
+        return _FakeResponse(200, VALID_ATOM_XML)
+
+    monkeypatch.setattr(reddit.httpx, "get", fake_get)
+
+    signals = reddit.fetch_recent_signals()
+
+    # Only the valid subreddit is ever requested -- the malformed entry
+    # never reaches httpx.get() at all.
+    assert calls == ["https://www.reddit.com/r/smallbusiness/new/.rss"]
+    assert len(signals) == 1
+
+
+def test_invalid_url_exception_is_caught_defense_in_depth(monkeypatch, caplog):
+    """Belt-and-braces: even if a malformed URL somehow reached httpx.get()
+    (bypassing _configured_subreddits()'s own validation), InvalidURL must
+    not crash the whole collector run."""
+    monkeypatch.setattr(global_settings, "reddit_subreddits", "smallbusiness")
+
+    def fake_get(url, timeout=None):
+        raise httpx.InvalidURL("simulated invalid URL")
+
+    monkeypatch.setattr(reddit.httpx, "get", fake_get)
+
+    with caplog.at_level(logging.ERROR):
+        signals = reddit.fetch_recent_signals()
+
+    assert signals == []
+    assert any("invalid URL" in r.message for r in caplog.records)
+
+
+def test_valid_subreddit_names_at_the_real_length_boundaries_are_accepted(monkeypatch):
+    monkeypatch.setattr(global_settings, "reddit_subreddits", "abc," + "a" * 21)  # 3-char min, 21-char max
+    calls = []
+
+    def fake_get(url, timeout=None):
+        calls.append(url)
+        return _FakeResponse(200, VALID_ATOM_XML)
+
+    monkeypatch.setattr(reddit.httpx, "get", fake_get)
+
+    reddit.fetch_recent_signals()
+
+    assert calls == [
+        "https://www.reddit.com/r/abc/new/.rss",
+        f"https://www.reddit.com/r/{'a' * 21}/new/.rss",
+    ]
+
+
 def test_no_auth_headers_or_credentials_are_sent(monkeypatch):
     """Public compliant access only -- no OAuth, no login cookies, no
     access tokens (CLAUDE.md / M3.4 task §2/§13)."""

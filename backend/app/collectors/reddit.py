@@ -1,5 +1,6 @@
 import calendar
 import logging
+import re
 
 import feedparser
 import httpx
@@ -15,6 +16,23 @@ REQUEST_TIMEOUT = 10.0
 # automation, no login. Sorted "new" so discovery sees fresh posts rather
 # than whatever Reddit's own hot-ranking already surfaced.
 REDDIT_RSS_URL_TEMPLATE = "https://www.reddit.com/r/{subreddit}/new/.rss"
+
+# LEAD fix (M3.4 pre-review): Reddit's own subreddit-naming rules (3-21
+# chars, letters/digits/underscore, must start with a letter or digit) --
+# validating BEFORE building a URL closes a real configuration-injection
+# gap found during review: without this, a REDDIT_SUBREDDITS value
+# containing "?"/"#"/".." would silently reshape the request path (e.g.
+# "test?x=1" turns "/new/.rss" into a bogus query string instead of the
+# intended path segment -- confirmed by direct httpx.URL construction, not
+# a network escape to a different host since the host is always the fixed
+# template string, but a real "config can quietly change fetch behavior"
+# bug), and a control character (tab/newline/NUL) raises httpx.InvalidURL,
+# which -- confirmed empirically -- is a plain Exception, NOT a subclass
+# of httpx.RequestError, so it was NOT caught by the except clauses below
+# and would have crashed the entire collector run (HN and RSS included,
+# since collect_raw_signals() runs all three collectors in one call)
+# rather than safely skipping just the one bad subreddit.
+_SUBREDDIT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_]{2,20}$")
 
 
 def fetch_recent_signals() -> list[dict]:
@@ -38,8 +56,21 @@ def fetch_recent_signals() -> list[dict]:
 
 
 def _configured_subreddits() -> list[str]:
+    """Split the raw config value, then keep only names matching Reddit's
+    own naming rules -- an invalid entry (path traversal, query/fragment
+    characters, whitespace, a full URL, control characters, ...) is
+    dropped and logged rather than ever reaching URL construction."""
     raw = settings.reddit_subreddits or ""
-    return [name.strip() for name in raw.split(",") if name.strip()]
+    valid: list[str] = []
+    for name in raw.split(","):
+        name = name.strip()
+        if not name:
+            continue
+        if not _SUBREDDIT_NAME_RE.match(name):
+            logger.error("reddit collector: skipping invalid subreddit name in config: %r", name)
+            continue
+        valid.append(name)
+    return valid
 
 
 def _fetch_subreddit(subreddit: str) -> list[dict]:
@@ -56,6 +87,14 @@ def _fetch_subreddit(subreddit: str) -> list[dict]:
         return []
     except httpx.RequestError as exc:
         logger.error("reddit collector: network error for r/%s: %s", subreddit, exc)
+        return []
+    except httpx.InvalidURL as exc:
+        # Defense-in-depth: _configured_subreddits()'s validation should
+        # already prevent this, but never let a malformed URL crash the
+        # whole collector run (HN/RSS included) instead of safely skipping
+        # this one subreddit -- see the module-level comment on
+        # _SUBREDDIT_NAME_RE for how this was found.
+        logger.error("reddit collector: invalid URL for r/%s: %s", subreddit, exc)
         return []
 
     try:

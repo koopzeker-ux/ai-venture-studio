@@ -78,11 +78,6 @@ def test_alternative_seeking_keyword_triggers_match(phrase):
     "phrase",
     [
         "we do this manually every single week",
-        "this process just takes hours to finish",
-        "I'm struggling with our current setup",
-        "so frustrated with this workflow",
-        "I hate using this clunky dashboard",
-        "why is there no simple way to do this",
         "is there a tool that can automate this for me",
     ],
 )
@@ -99,7 +94,6 @@ def test_m3_4_pain_point_phrase_extension_matches(phrase):
         "looking for software to manage bookings",
         "where can I buy something like this",
         "I need a product that solves onboarding",
-        "willing to pay for a proper solution",
         "can anyone recommend a service for this",
     ],
 )
@@ -109,19 +103,79 @@ def test_m3_4_purchase_intent_phrase_extension_matches(phrase):
     assert candidates[0]["evidence_type"] == EVIDENCE_TYPE_PURCHASE_INTENT
 
 
+def test_m3_4_alternative_seeking_phrase_extension_matches():
+    candidates = detect_candidates(_signal(content="looking to replace this clunky system"))
+    assert len(candidates) == 1
+    assert candidates[0]["evidence_type"] == EVIDENCE_TYPE_ALTERNATIVE_SEEKING
+
+
+# ===========================================================================
+# LEAD fix (M3.4 pre-review, precision): "this process just takes hours to
+# finish"/"I'm struggling with our current setup"/"so frustrated with this
+# workflow"/"I hate using this clunky dashboard"/"why is there no simple way
+# to do this" (PAIN_POINT), "willing to pay for a proper solution"
+# (PURCHASE_INTENT), and "what's a good alternative to this expensive
+# tool"/"any alternatives to this out there"/"what do you use instead of
+# this"/"looking for a replacement for our current stack"/"we are switching
+# from this to something cheaper" (ALTERNATIVE_SEEKING) were REMOVED from
+# BUILDER's own positive-match parametrize lists above -- the underlying
+# phrases were removed from candidate_filter.py after adversarial testing
+# proved each one also fires on ordinary, non-commercial sentences (see the
+# module-level comments on PAIN_POINT_PHRASES/PURCHASE_INTENT_PHRASES/
+# ALTERNATIVE_SEEKING_PHRASES for the specific counter-examples). This is
+# not a weakened assertion -- it is the direct, intended consequence of a
+# precision fix, verified below as the new expected (negative) behavior.
+# ===========================================================================
+
 @pytest.mark.parametrize(
-    "phrase",
+    "adversarial_text",
     [
-        "what's a good alternative to this expensive tool",
-        "any alternatives to this out there",
-        "what do you use instead of this",
-        "looking for a replacement for our current stack",
-        "we are switching from this to something cheaper",
+        "I am struggling with my mental health lately",
+        "I am frustrated with my kids not listening",
+        "I hate using public transport in the rain",
+        "why is there no update to this app yet",
+        "this movie takes hours to get through",
+    ],
+)
+def test_removed_pain_point_phrases_no_longer_false_positive(adversarial_text):
+    candidates = detect_candidates(_signal(content=adversarial_text))
+    assert candidates == []
+
+
+def test_removed_purchase_intent_phrase_no_longer_false_positives():
+    candidates = detect_candidates(_signal(content="willing to pay my taxes on time this year"))
+    assert candidates == []
+
+
+@pytest.mark.parametrize(
+    "adversarial_text",
+    [
+        "what is a good alternative to democracy",
+        "what are some alternatives to war",
+        "I walked instead of driving today",
+        "looking for a replacement for my missing tooth",
+        "we are switching from Windows to Linux for gaming",
+    ],
+)
+def test_removed_alternative_seeking_phrases_no_longer_false_positive(adversarial_text):
+    candidates = detect_candidates(_signal(content=adversarial_text))
+    assert candidates == []
+
+
+@pytest.mark.parametrize(
+    "safe_text",
+    [
+        "looking for an alternative to this expensive SaaS",
+        "is there a better alternative to this clunky tool",
+        "can anyone recommend an alternative to this",
         "looking to replace this clunky system",
     ],
 )
-def test_m3_4_alternative_seeking_phrase_extension_matches(phrase):
-    candidates = detect_candidates(_signal(content=phrase))
+def test_original_and_kept_alternative_seeking_phrases_still_match(safe_text):
+    """Confirms the precision fix removed only the unanchored additions --
+    the three original, already-anchored phrases and the one kept M3.4
+    addition are unaffected."""
+    candidates = detect_candidates(_signal(content=safe_text))
     assert len(candidates) == 1
     assert candidates[0]["evidence_type"] == EVIDENCE_TYPE_ALTERNATIVE_SEEKING
 

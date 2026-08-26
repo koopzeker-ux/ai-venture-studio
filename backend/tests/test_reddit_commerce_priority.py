@@ -108,6 +108,40 @@ def test_low_engagement_commercial_intent_outranks_high_engagement_pure_traction
     assert urls == {"https://www.reddit.com/r/smallbusiness/comments/x2/"}
 
 
+def test_commerce_tier_survives_the_real_volume_cap_against_a_large_traction_batch(db_session):
+    """LEAD fix (M3.4 pre-review §7): the 1-vs-1 test above proves the
+    ordering principle, but does not exercise the REAL
+    MAX_NEW_OPPORTUNITIES_PER_RUN cap (20) -- this constructs an
+    adversarial batch that actually exceeds it: 30 very-high-engagement,
+    purely-informational traction candidates plus exactly one Reddit item
+    with NO engagement_score at all (Reddit's public RSS never exposes
+    one) but genuine purchase intent. The commercial candidate must be
+    among the 20 created, regardless of how many traction-only candidates
+    compete for the remaining slots."""
+    from app.collectors.pipeline import MAX_NEW_OPPORTUNITIES_PER_RUN
+
+    signals = [
+        _news_raw(
+            "hackernews", f"https://news.ycombinator.com/item?id={i}",
+            title=f"Major viral news story number {i}", content="nothing commercial here, just news",
+            engagement_score=5000 + i,
+        )
+        for i in range(30)
+    ]
+    signals.append(_reddit_raw(
+        "https://www.reddit.com/r/smallbusiness/comments/theone/",
+        title="Would pay for this",
+        content="I run a dental practice and would pay for a tool that automates scheduling",
+    ))
+
+    result = process_raw_signals(db_session, signals, engagement_threshold=50)
+
+    assert result["candidates_created"] == MAX_NEW_OPPORTUNITIES_PER_RUN
+    assert result["candidates_skipped_cap"] == 31 - MAX_NEW_OPPORTUNITIES_PER_RUN
+    survivor_urls = {e.source_url for e in db_session.scalars(select(Evidence)).all()}
+    assert "https://www.reddit.com/r/smallbusiness/comments/theone/" in survivor_urls
+
+
 def test_pure_traction_only_survives_when_cap_is_not_hit(db_session):
     """Commerce-first ranking is about ordering under a cap, not deleting
     traction-only candidates outright -- traction_signal alone still
