@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -128,7 +129,30 @@ TEST_REQUIRED_EVIDENCE_CONFIDENCE = "HIGH"
 # attempt at understanding the text; see _is_concrete_text.
 MIN_CONCRETE_TEXT_LEN = 15
 
+# LEAD fix (M3.3 REVIEWER CRITICAL finding 3): weight >= TEST_MIN_COVERAGE
+# is not the same guarantee as "the commercially decisive dimensions were
+# actually assessed" -- coverage is weight-blind to WHICH dimensions filled
+# it. TEST additionally requires these three (the clearest technical
+# signals of "does a real problem/pain/willingness-to-pay exist") to have
+# actually been assessed (both rating and confidence known -- see
+# _score_from_dimensions's included_in_score), not merely UNKNOWN-and-
+# renormalized-away. Deliberately three, not all nine: the ask is "TEST
+# requires core demand evidence", not a per-dimension gate for every axis.
+CORE_DEMAND_DIMENSIONS: tuple[str, ...] = ("customer_problem", "buying_intent", "customer_pain")
+
 REJECT_SCORE_FLOOR = 20.0
+# LEAD fix (M3.3 REVIEWER CRITICAL finding 2): the absolute floor must not
+# fire from low COVERAGE alone -- one honestly-NEGATIVE dimension out of
+# nine, with the other 85 weight points genuinely UNKNOWN (simply
+# unresearched, not bad), renormalizes to score=0.0, identical to a
+# fully-researched, uniformly-terrible opportunity. UNKNOWN != 0 must hold
+# at the decision-gate level too, not just inside _score_from_dimensions.
+# Reuses TEST_MIN_COVERAGE rather than a new constant: the same amount of
+# assessment we require to trust a positive verdict is required to trust a
+# firm negative one. Below this coverage, an absolute-floor score falls
+# through to WATCH instead (still eligible for REJECT via the LOW-
+# confidence-combined-with-weak-score branch below, or a real fatal risk).
+REJECT_SCORE_FLOOR_MIN_COVERAGE = TEST_MIN_COVERAGE
 # REJECT only from LOW confidence when the score is ALSO weak -- a
 # genuinely promising but under-researched idea (LOW confidence, decent
 # score) is WATCH, not REJECT; only the combination of thin evidence AND a
@@ -142,6 +166,21 @@ REJECT_LOW_CONFIDENCE_SCORE_CEILING = 35.0
 # is one input among several (10 of 100 points) and is never, by itself,
 # sufficient to reach HIGH -- see the hard gates in _compute_evidence_confidence
 # (section 8's explicit warning).
+#
+# ACCEPTED LIMITATION (M3.3 REVIEWER MEDIUM finding, LEAD decision:
+# documented, not solved here): `independently_confirmed` is M3.2's own
+# self-report signal -- set when another non-duplicate Evidence row shares
+# the same normalized claim text + stance, NOT proof that two sources are
+# genuinely, causally independent. Several rows that a human would
+# recognize as all citing the same underlying press release/study, worded
+# differently and at different URLs, can legitimately satisfy every one of
+# the five HIGH hard gates below and reach evidence_confidence=HIGH. This
+# was already M3.2's documented caveat; M3.3 does not weaken or hide it,
+# but it now gates a real money-spend TEST recommendation, not just a
+# dossier display. No provenance graph is built to solve this here (out of
+# scope for this milestone, CLAUDE.md SS15) -- it remains a known limitation
+# for manual human inspection during the live dogfood, same as M3.2's own
+# accepted limitation.
 _EC_VOLUME_WEIGHT = 30.0
 _EC_VOLUME_SATURATION_COUNT = 5  # non-duplicate rows at which the volume term saturates
 _EC_RELIABILITY_WEIGHT = 25.0
@@ -436,12 +475,37 @@ def _coerce_evidence_refs(value: object, anomalies: list[str], where: str) -> li
     return refs
 
 
+# LEAD fix (M3.3 REVIEWER MEDIUM findings 7/8): a conservative hard ceiling
+# for a PROPOSED experiment's budget at this stage of AVS -- a single-
+# maintainer, bootstrapped venture studio whose whole point is the
+# CHEAPEST viable test (landing pages, small paid-ad tests, manual
+# outreach), which should essentially never legitimately reach five
+# figures. This is not a spending authorization or an approved budget --
+# Experiment.status stays "proposed" regardless, per CLAUDE.md's human
+# approval gates -- it only stops an absurd/fabricated figure (or a raw
+# Infinity, which json.loads accepts by default and which `value >= 0`
+# alone does not reject) from silently persisting into a number a human
+# might skim and trust.
+EXPERIMENT_BUDGET_EUR_MAX = 50_000.0
+
+
 def _coerce_budget_eur(value: object, anomalies: list[str]) -> float | None:
     if isinstance(value, bool):
         anomalies.append(f"experiment.budget_eur must be numeric, got bool {value!r}; left unknown")
         return None
-    if isinstance(value, (int, float)) and value >= 0:
-        return float(value)
+    if isinstance(value, (int, float)):
+        as_float = float(value)
+        if math.isnan(as_float) or math.isinf(as_float):
+            anomalies.append(f"experiment.budget_eur value {value!r} is not a finite number; left unknown")
+            return None
+        if 0.0 <= as_float <= EXPERIMENT_BUDGET_EUR_MAX:
+            return as_float
+        if as_float > EXPERIMENT_BUDGET_EUR_MAX:
+            anomalies.append(
+                f"experiment.budget_eur value {as_float!r} exceeds the {EXPERIMENT_BUDGET_EUR_MAX} ceiling "
+                "for a proposed experiment at this stage; left unknown"
+            )
+            return None
     if value is not None:
         anomalies.append(f"experiment.budget_eur value {value!r} invalid; left unknown")
     else:
@@ -543,6 +607,40 @@ def _validate_evidence_refs(dimensions: dict[str, DimensionAssessment], valid_id
         dim.evidence_refs = cleaned
         if dim.confidence in ("HIGH", "MEDIUM") and not cleaned:
             anomalies.append(f"{key}: confidence={dim.confidence} claimed with no valid evidence_refs; downgraded to UNKNOWN for scoring")
+            dim.confidence = "UNKNOWN"
+
+
+def _validate_evidence_stance_consistency(
+    dimensions: dict[str, DimensionAssessment], evidence_by_id: dict[int, Evidence], anomalies: list[str]
+) -> None:
+    """LEAD fix (M3.3 REVIEWER MEDIUM finding): a dimension's `rating` was
+    never cross-checked against the actual `stance` of the Evidence rows it
+    cites -- POSITIVE citing ONLY CONTRADICTS-stance evidence (or NEGATIVE
+    citing ONLY SUPPORTS-stance evidence) is an internal inconsistency a
+    small, deterministic rule can catch without any semantic inference:
+    called after _validate_evidence_refs (so evidence_refs are already
+    filtered to real, owned ids). If EVERY valid ref for a dimension has a
+    stance directly opposing the dimension's own rating, that rating/
+    confidence claim is not actually supported by what was cited, and both
+    are downgraded to UNKNOWN for scoring -- the same treatment
+    _validate_evidence_refs already gives an unbacked HIGH/MEDIUM claim.
+    Deliberately narrow: a MIXED citation (some supporting, some
+    contradicting) is left alone -- weighing partial, conflicting evidence
+    is a real judgment call this does not attempt to automate; only the
+    unambiguous, fully one-sided case is corrected."""
+    for key, dim in dimensions.items():
+        if dim.rating not in ("POSITIVE", "NEGATIVE") or not dim.evidence_refs:
+            continue
+        stances = [evidence_by_id[ref].stance for ref in dim.evidence_refs if ref in evidence_by_id]
+        if not stances:
+            continue
+        opposing_stance = "CONTRADICTS" if dim.rating == "POSITIVE" else "SUPPORTS"
+        if all(s == opposing_stance for s in stances):
+            anomalies.append(
+                f"{key}: rating={dim.rating} but every cited evidence_ref has stance={opposing_stance}; "
+                "downgraded to UNKNOWN for scoring"
+            )
+            dim.rating = "UNKNOWN"
             dim.confidence = "UNKNOWN"
 
 
@@ -694,17 +792,45 @@ def _is_concrete_text(text: str) -> bool:
 def _determine_recommendation(
     score: float, coverage: float, evidence_confidence_label: str,
     red_team: RedTeamAssessment, experiment: ExperimentProposal,
+    dimension_breakdown: dict[str, dict] | None = None,
 ) -> tuple[str, list[str]]:
     """The one and only place TEST/WATCH/REJECT is decided -- purely from
     already-computed deterministic values (score, coverage,
     evidence_confidence_label) and structured red_team/experiment fields,
     never from any LLM-authored recommendation string. TEST is strictly
     harder than WATCH: WATCH is simply "not REJECT, and fails at least one
-    TEST gate."""
-    if red_team.fatal_risks:
-        return "REJECT", [f"fatal red-team risk(s) identified ({len(red_team.fatal_risks)}); cannot proceed"]
-    if score < REJECT_SCORE_FLOOR:
-        return "REJECT", [f"score {score} is below the absolute floor {REJECT_SCORE_FLOOR}"]
+    TEST gate."
+
+    `dimension_breakdown` (the per-dimension dict _score_from_dimensions
+    returns) is optional and defaults to None -- when omitted, the
+    core-demand-dimension TEST gate below is not evaluated (treated as
+    satisfied), which keeps this function usable for unit-level tests that
+    exercise the score/coverage/confidence/fatal-risk gates in isolation
+    without needing to fabricate a full breakdown dict. dispatch_critic
+    (the only production caller) always supplies the real breakdown -- see
+    CORE_DEMAND_DIMENSIONS's own comment for why this gate exists.
+    """
+    # LEAD fix (M3.3 REVIEWER CRITICAL finding 1): a fatal risk must pass
+    # the same minimum-concreteness bar as cheapest_test/stop_criteria
+    # before it can single-handedly override every other signal -- a
+    # single unsubstantiated word ("risk") is not a technical basis for a
+    # deterministic REJECT. Non-concrete entries are simply not counted
+    # here; the caller (dispatch_critic) separately logs an anomaly for
+    # each one so it isn't silently dropped from the audit trail.
+    concrete_fatal_risks = [r for r in red_team.fatal_risks if _is_concrete_text(r)]
+    if concrete_fatal_risks:
+        return "REJECT", [f"fatal red-team risk(s) identified ({len(concrete_fatal_risks)}); cannot proceed"]
+
+    # LEAD fix (M3.3 REVIEWER CRITICAL finding 2): the absolute floor must
+    # not fire from low coverage alone -- see REJECT_SCORE_FLOOR_MIN_COVERAGE's
+    # own comment. Below that coverage, a low score simply falls through
+    # (still eligible for REJECT via the LOW-confidence branch below, or
+    # WATCH otherwise) rather than being treated as proven bad news.
+    if score < REJECT_SCORE_FLOOR and coverage >= REJECT_SCORE_FLOOR_MIN_COVERAGE:
+        return "REJECT", [
+            f"score {score} is below the absolute floor {REJECT_SCORE_FLOOR}, "
+            f"with sufficient coverage {coverage} >= {REJECT_SCORE_FLOOR_MIN_COVERAGE} to trust it"
+        ]
     if evidence_confidence_label == "LOW" and score < REJECT_LOW_CONFIDENCE_SCORE_CEILING:
         return "REJECT", [
             f"LOW evidence confidence combined with a weak score {score} "
@@ -713,6 +839,13 @@ def _determine_recommendation(
 
     cheapest_test_concrete = _is_concrete_text(experiment.cheapest_test)
     stop_criteria_concrete = _is_concrete_text(experiment.stop_criteria)
+    # LEAD fix (M3.3 REVIEWER CRITICAL finding 3): coverage >= TEST_MIN_COVERAGE
+    # of TOTAL weight is weight-blind to WHICH dimensions filled it -- TEST
+    # additionally requires the three core demand dimensions to have
+    # actually been assessed (see CORE_DEMAND_DIMENSIONS).
+    core_dimensions_known = dimension_breakdown is None or all(
+        dimension_breakdown.get(key, {}).get("included_in_score") for key in CORE_DEMAND_DIMENSIONS
+    )
 
     gates_met = (
         score >= TEST_MIN_SCORE
@@ -720,11 +853,13 @@ def _determine_recommendation(
         and evidence_confidence_label == TEST_REQUIRED_EVIDENCE_CONFIDENCE
         and cheapest_test_concrete
         and stop_criteria_concrete
+        and core_dimensions_known
     )
     if gates_met:
         return "TEST", [
             f"score {score} >= {TEST_MIN_SCORE}, coverage {coverage} >= {TEST_MIN_COVERAGE}, "
-            f"evidence_confidence {evidence_confidence_label}, concrete experiment plan, no fatal red-team risk"
+            f"evidence_confidence {evidence_confidence_label}, concrete experiment plan, "
+            f"core demand dimensions assessed, no fatal red-team risk"
         ]
 
     reasons = []
@@ -738,6 +873,12 @@ def _determine_recommendation(
         reasons.append("cheapest_test is not concrete enough")
     if not stop_criteria_concrete:
         reasons.append("stop_criteria (kill criteria) is not concrete enough")
+    if not core_dimensions_known:
+        unknown_core = [
+            key for key in CORE_DEMAND_DIMENSIONS
+            if not (dimension_breakdown or {}).get(key, {}).get("included_in_score")
+        ]
+        reasons.append(f"core demand dimension(s) not assessed: {', '.join(unknown_core)}")
     return "WATCH", reasons
 
 
@@ -874,7 +1015,18 @@ def _build_critic_summary(
     lines.append("")
 
     lines.append(f"SCORE: {score}/100  (evidence-backed factors only)")
-    lines.append(f"COVERAGE: {round(coverage * 100, 1)}% of desired factors could be assessed from available evidence")
+    # LEAD fix (M3.3 REVIEWER HIGH finding): "coverage" is DIMENSION/
+    # EVALUATION coverage -- how much of the nine-factor scoring rubric
+    # could be assessed at all -- never a measure of evidence breadth or
+    # source independence. Citing one weak Evidence row across all nine
+    # dimensions can legitimately reach 100% dimension coverage; the
+    # separate EVIDENCE CONFIDENCE line (computed from Evidence rows
+    # directly, gating TEST on its own) is what actually speaks to evidence
+    # quality/breadth -- read both, never coverage alone.
+    lines.append(
+        f"DIMENSION COVERAGE: {round(coverage * 100, 1)}% of the scoring rubric could be assessed "
+        "(NOT a measure of evidence breadth or source independence -- see EVIDENCE CONFIDENCE below for that)"
+    )
     lines.append(f"EVIDENCE CONFIDENCE: {evidence_confidence_label}")
     lines.append("")
     lines.append(f"FINAL DETERMINISTIC RECOMMENDATION: {recommendation}")
@@ -958,18 +1110,40 @@ def dispatch_critic(
             model="claude-code", success=False,
         )
 
-    valid_evidence_ids = {e.id for e in evidence_rows}
-    _validate_evidence_refs(payload.dimensions, valid_evidence_ids, payload.anomalies)
+    evidence_by_id = {e.id: e for e in evidence_rows}
+    _validate_evidence_refs(payload.dimensions, set(evidence_by_id), payload.anomalies)
+    _validate_evidence_stance_consistency(payload.dimensions, evidence_by_id, payload.anomalies)
+
+    # LEAD fix (M3.3 REVIEWER CRITICAL finding 1): a non-concrete fatal risk
+    # is never dropped silently -- it stays visible in score_breakdown/
+    # critic_summary for a human to judge, it just cannot by itself force
+    # the deterministic REJECT gate (see _determine_recommendation).
+    for risk in payload.red_team.fatal_risks:
+        if not _is_concrete_text(risk):
+            payload.anomalies.append(
+                f"red_team.fatal_risks entry {risk!r} is not concrete/specific enough to act as a "
+                "deterministic REJECT blocker; visible in the memo but ignored for the gate"
+            )
 
     score, coverage, score_dim_breakdown = _score_from_dimensions(payload.dimensions)
     evidence_confidence_value, evidence_confidence_label, ec_breakdown = _compute_evidence_confidence(evidence_rows)
     recommendation, reasons = _determine_recommendation(
-        score, coverage, evidence_confidence_label, payload.red_team, payload.experiment
+        score, coverage, evidence_confidence_label, payload.red_team, payload.experiment,
+        dimension_breakdown=score_dim_breakdown,
     )
 
     score_breakdown = {
         "dimensions": score_dim_breakdown,
         "coverage": coverage,
+        # LEAD fix (M3.3 REVIEWER HIGH finding): additive clarification, not
+        # a rename (score_breakdown["coverage"] itself is unchanged so
+        # nothing that already reads it breaks) -- see the identical
+        # DIMENSION COVERAGE line in _build_critic_summary for the full
+        # rationale.
+        "coverage_note": (
+            "dimension/rubric coverage only -- NOT a measure of evidence "
+            "breadth or source independence; see evidence_confidence for that"
+        ),
         "evidence_confidence": {"label": evidence_confidence_label, "value": evidence_confidence_value, **ec_breakdown},
         "economics_known": payload.economics.known,
         "economics_unknown": payload.economics.unknown,

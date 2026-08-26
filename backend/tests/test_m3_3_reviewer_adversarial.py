@@ -171,27 +171,20 @@ def _strong_independent_evidence_rows(db, opp_id, n=6) -> list[Evidence]:
 # ===========================================================================
 
 def test_CRITICAL_unsubstantiated_one_word_fatal_risk_kills_a_perfect_opportunity(db_session):
-    """Section 6's named special target, proven end-to-end through the real
-    dispatch_critic path (not just _determine_recommendation in isolation).
-
-    red_team.fatal_risks has NO evidence_refs field at all in the schema
-    (unlike every DIMENSION_KEYS entry, which is validated against real
-    Evidence ids via _validate_evidence_refs) and NO minimum-concreteness
-    check (unlike experiment.cheapest_test/stop_criteria, which are gated
-    through _is_concrete_text). A single low-effort, unsubstantiated,
-    un-cross-checked string -- here deliberately just "risk", the vaguest
-    possible entry that still passes _coerce_str_list's non-empty check --
-    is sufficient to force REJECT on an opportunity that is otherwise
-    perfect on every other axis: all 9 dimensions POSITIVE/HIGH with real
-    evidence backing, a genuinely strong evidence dossier (6 independent,
-    non-duplicate, HIGH-reliability rows -- clears evidence_confidence=HIGH
-    for real), and a concrete, fully-specified experiment plan.
-
-    This is not attacking the "fatal_risks -> REJECT" causality itself --
-    that is INTELLIGENCE's own deliberate, tested design (test_L in
-    test_critic.py). This attacks the complete ABSENCE of any technical
-    requirement that a fatal risk be evidence-grounded or even minimally
-    specific before it can single-handedly override every other signal.
+    """LEAD FIX (M3.3 REVIEWER CRITICAL finding 1, resolved): inverted from
+    the original finding, which proved a single unsubstantiated word
+    ("risk") could force REJECT on an otherwise-perfect opportunity.
+    _determine_recommendation now filters red_team.fatal_risks through the
+    same _is_concrete_text bar already used for cheapest_test/
+    stop_criteria before a fatal risk can gate REJECT -- "risk" (4 chars,
+    well under MIN_CONCRETE_TEXT_LEN=15) no longer counts. The non-concrete
+    entry is NOT silently dropped, though: dispatch_critic logs an anomaly
+    for it and it remains visible in score_breakdown/red_team for a human
+    to judge -- only the deterministic REJECT gate ignores it. This
+    dossier is otherwise genuinely TEST-worthy (all 9 dimensions POSITIVE/
+    HIGH with real evidence, 6 independent HIGH-reliability rows clearing
+    evidence_confidence=HIGH, a concrete experiment plan, all three core
+    demand dimensions assessed) -- it should now reach TEST, not REJECT.
     """
     opp = _make_opportunity(db_session)
     evidence_rows = _strong_independent_evidence_rows(db_session, opp.id, n=6)
@@ -205,11 +198,14 @@ def test_CRITICAL_unsubstantiated_one_word_fatal_risk_kills_a_perfect_opportunit
     run = dispatch_critic(db_session, opp.id, repo_path="/fake", run_critic_fn=lambda **kw: worker_result)
     assert run.success is True
     refreshed = db_session.get(Opportunity, opp.id)
-    assert refreshed.score is not None and refreshed.score >= 65.0  # score gate alone would have cleared TEST
+    assert refreshed.score is not None and refreshed.score >= 65.0
     assert refreshed.evidence_confidence is not None
-    assert refreshed.score_breakdown["recommendation"] == "REJECT"
+    assert refreshed.score_breakdown["recommendation"] == "TEST"
+    # Non-concrete fatal risk stays visible in the audit trail, just not
+    # deterministically blocking.
     assert refreshed.score_breakdown["red_team"]["fatal_risks"] == ["risk"]
-    assert db_session.scalars(select(Experiment).where(Experiment.opportunity_id == opp.id)).all() == []
+    assert any("not concrete" in a for a in refreshed.score_breakdown["anomalies"])
+    assert len(db_session.scalars(select(Experiment).where(Experiment.opportunity_id == opp.id)).all()) == 1
 
 
 # ===========================================================================
@@ -240,10 +236,21 @@ def test_CRITICAL_single_negative_dimension_with_low_coverage_forces_absolute_re
     """
     opp = _make_opportunity(db_session)
     evidence_rows = _strong_independent_evidence_rows(db_session, opp.id, n=6)
-    ec_value, ec_label, _ = _compute_evidence_confidence(evidence_rows)
+    # A dedicated, stance-neutral row for the one NEGATIVE-rated dimension:
+    # the shared "strong independent" rows are all stance=SUPPORTS (about a
+    # different claim entirely), which the LEAD stance-consistency fix
+    # (_validate_evidence_stance_consistency) would now correctly treat as
+    # inconsistent with a NEGATIVE rating -- this test is about the
+    # coverage-gated REJECT floor, not that fix, so give competition its
+    # own, internally-consistent citation instead.
+    competition_row = _make_evidence(
+        db_session, opp.id, claim="Competitor X dominates 90% of market share", source="Industry Report",
+        stance=None, source_reliability="HIGH", claim_type="FACT", independently_confirmed=False,
+    )
+    ec_value, ec_label, _ = _compute_evidence_confidence(evidence_rows + [competition_row])
     assert ec_label == "HIGH"
 
-    refs = [e.id for e in evidence_rows]
+    refs = [competition_row.id]
     payload = {k: _dim("UNKNOWN", "UNKNOWN") for k in DIMENSION_KEYS}
     payload["competition"] = _dim("NEGATIVE", "HIGH", refs=refs, assessment="Market is saturated, no viable wedge.")
     payload["economics"] = {"assessment": "x", "known": [], "unknown": ["everything"]}
@@ -262,25 +269,36 @@ def test_CRITICAL_single_negative_dimension_with_low_coverage_forces_absolute_re
     assert refreshed.score == 0.0
     assert refreshed.score_breakdown["coverage"] == pytest.approx(0.10, abs=0.001)  # only competition's weight known
     assert refreshed.evidence_confidence is not None and refreshed.score_breakdown["evidence_confidence"]["label"] == "HIGH"
-    assert refreshed.score_breakdown["recommendation"] == "REJECT"
-    assert "floor" in refreshed.score_breakdown["recommendation_reasons"][0]
+    # LEAD FIX (M3.3 REVIEWER CRITICAL finding 2, resolved): inverted from
+    # the original finding -- REJECT_SCORE_FLOOR now requires coverage
+    # >= REJECT_SCORE_FLOOR_MIN_COVERAGE (0.70) to fire, so this 0.10-
+    # coverage/score=0.0 case (one honestly-NEGATIVE dimension, the other
+    # 85 weight points genuinely UNKNOWN, not bad) no longer hits the
+    # absolute floor -- it correctly falls through to WATCH: not enough
+    # was actually assessed to trust either a firm REJECT or a TEST,
+    # despite a genuinely strong evidence_confidence=HIGH dossier.
+    assert refreshed.score_breakdown["recommendation"] == "WATCH"
     assert db_session.scalars(select(Experiment).where(Experiment.opportunity_id == opp.id)).all() == []
 
 
 def test_CRITICAL_all_unknown_dossier_also_hits_the_same_reject_floor_end_to_end(db_session):
-    """Companion to the above via _determine_recommendation directly (no DB
-    round-trip needed to prove this half): confirms the all-UNKNOWN case
-    test_critic.py's own test_F only checks in isolation (score==0.0,
-    coverage==0.0, 'not a crash') actually resolves to REJECT once fed
-    through the real decision gate -- something test_F never asserts."""
+    """LEAD FIX (M3.3 REVIEWER CRITICAL finding 2, resolved): inverted --
+    originally proved the all-UNKNOWN case (coverage=0.0) resolved to
+    REJECT via the absolute score floor, contradicting the module's own
+    "UNKNOWN != 0" design intent. REJECT_SCORE_FLOOR now requires
+    sufficient coverage (>= REJECT_SCORE_FLOOR_MIN_COVERAGE) to fire; at
+    coverage=0.0 it does not, and the case correctly falls through to
+    WATCH -- "we don't know enough to say anything" rather than "this is
+    proven bad." Kept as a permanent regression guard against this exact
+    class of bug recurring, not deleted."""
     rt = RedTeamAssessment(strongest_case_against=[], fatal_risks=[], missing_evidence=[])
     exp = ExperimentProposal(
         hypothesis="h", critical_assumption="c", cheapest_test="a fully concrete cheap test plan here",
         budget_eur=None, success_criteria="s", stop_criteria="a fully concrete stop criteria here",
     )
     rec, reasons = _determine_recommendation(0.0, 0.0, "HIGH", rt, exp)
-    assert rec == "REJECT"
-    assert "floor" in reasons[0]
+    assert rec == "WATCH"
+    assert reasons  # explains what's missing, same as any other WATCH
 
 
 # ===========================================================================
@@ -328,9 +346,20 @@ def test_CRITICAL_test_reached_with_the_single_most_important_dimension_entirely
     assert refreshed.score_breakdown["dimensions"]["buying_intent"]["included_in_score"] is False
     assert refreshed.score_breakdown["coverage"] == pytest.approx(0.85, abs=0.001)
     assert refreshed.score >= 65.0
-    assert refreshed.score_breakdown["recommendation"] == "TEST"
+    # LEAD FIX (M3.3 REVIEWER CRITICAL finding 3, resolved): inverted --
+    # originally proved TEST was reachable with buying_intent (the single
+    # highest-weighted, clearest "will anyone pay" signal) entirely
+    # UNKNOWN, despite score/coverage/evidence_confidence all otherwise
+    # clearing their gates. TEST now additionally requires all of
+    # CORE_DEMAND_DIMENSIONS (customer_problem, buying_intent,
+    # customer_pain) to have actually been assessed -- coverage>=0.70 of
+    # TOTAL weight is no longer sufficient on its own. Correctly falls
+    # through to WATCH, and zero Experiments are proposed: no money-spend
+    # recommendation with the core "will anyone buy this" question unasked.
+    assert refreshed.score_breakdown["recommendation"] == "WATCH"
+    assert any("buying_intent" in r for r in refreshed.score_breakdown["recommendation_reasons"])
     experiments = db_session.scalars(select(Experiment).where(Experiment.opportunity_id == opp.id)).all()
-    assert len(experiments) == 1  # money-spend recommendation produced with zero buying-intent evidence
+    assert experiments == []
 
 
 # ===========================================================================
@@ -440,42 +469,62 @@ def test_MEDIUM_evidence_confidence_HIGH_reachable_from_best_effort_independence
 # ===========================================================================
 
 def test_MEDIUM_positive_infinity_budget_silently_accepted_as_a_known_value():
-    """Section 8's explicit 'NaN/infinity if parser permits it' case.
-    Python's json.loads accepts the non-standard `Infinity` token by
-    default (confirmed independently: json.loads('{"x": Infinity}') ==
-    {'x': inf}, exercised through BOTH JSON layers this module uses -- the
-    outer Claude envelope in run_critic() and the inner payload in
-    parse_critic_payload()/_extract_json_object()). _coerce_budget_eur's
-    only numeric check is `value >= 0`, and `float('inf') >= 0` is True --
-    so a budget_eur of Infinity is accepted as a real, known, positive
-    number with ZERO anomaly logged (every other invalid case -- negative,
-    NaN, string, bool -- does log one). Confirmed this also survives an
-    actual SQLite Float-column INSERT/commit without error.
-    """
+    """LEAD FIX (M3.3 REVIEWER MEDIUM finding 7, resolved): inverted --
+    originally proved Infinity was accepted as a real budget with zero
+    anomaly (Python's json.loads parses the non-standard `Infinity` token
+    by default, and the old `value >= 0` check alone does not reject it).
+    _coerce_budget_eur now explicitly rejects non-finite values
+    (math.isnan/math.isinf) with an anomaly, the same as every other
+    invalid case."""
     anomalies: list[str] = []
     result = _coerce_budget_eur(float("inf"), anomalies)
-    assert result == float("inf")
-    assert anomalies == []  # no anomaly at all -- looks identical to a genuine, trusted value
+    assert result is None
+    assert any("not a finite number" in a for a in anomalies)
 
     # End-to-end through the real JSON parser layer, not just the coercion
     # function in isolation:
     payload_with_infinity = json.loads('{"budget_eur": Infinity}')
     assert math.isinf(payload_with_infinity["budget_eur"])
     anomalies2: list[str] = []
-    assert _coerce_budget_eur(payload_with_infinity["budget_eur"], anomalies2) == float("inf")
+    assert _coerce_budget_eur(payload_with_infinity["budget_eur"], anomalies2) is None
+    assert anomalies2
+
+
+def test_negative_infinity_and_nan_budget_also_rejected():
+    for bad_value in (float("-inf"), float("nan")):
+        anomalies: list[str] = []
+        assert _coerce_budget_eur(bad_value, anomalies) is None
+        assert any("not a finite number" in a for a in anomalies)
 
 
 def test_MEDIUM_absurdly_large_finite_budget_has_no_upper_bound():
+    """LEAD FIX (M3.3 REVIEWER MEDIUM finding 8, resolved): inverted --
+    originally proved no sanity ceiling existed at all. _coerce_budget_eur
+    now rejects anything above EXPERIMENT_BUDGET_EUR_MAX (a conservative
+    50,000 EUR ceiling for a PROPOSED cheapest-test experiment at this
+    stage of AVS, not a spending authorization -- see the constant's own
+    comment), with an anomaly logged."""
+    from app.evaluation.run_critic import EXPERIMENT_BUDGET_EUR_MAX
+
     anomalies: list[str] = []
     result = _coerce_budget_eur(50_000_000_000.0, anomalies)
-    assert result == 50_000_000_000.0
-    assert anomalies == []  # no sanity ceiling exists at all
+    assert result is None
+    assert any("exceeds" in a for a in anomalies)
+
+    # A realistic, sub-ceiling budget must still pass through untouched.
+    anomalies2: list[str] = []
+    assert _coerce_budget_eur(EXPERIMENT_BUDGET_EUR_MAX, anomalies2) == EXPERIMENT_BUDGET_EUR_MAX
+    assert anomalies2 == []
 
 
 def test_infinite_budget_persists_to_a_real_experiment_row_end_to_end(db_session):
-    """Closes the loop: an Infinity budget_eur is not just accepted by the
-    coercion function in isolation -- it reaches a real, committed
-    Experiment row a human could read as a legitimate figure."""
+    """LEAD FIX (M3.3 REVIEWER MEDIUM finding 7, resolved): inverted --
+    originally closed the loop showing Infinity reached a real, committed
+    Experiment row. Now closes the loop the other way: an Infinity
+    budget_eur is rejected before it ever reaches persistence -- the
+    Experiment row is still created (TEST is otherwise earned by this
+    dossier), but with budget_eur=None (unknown), never a fabricated or
+    nonsensical figure a human could mistake for a real number."""
     opp = _make_opportunity(db_session)
     evidence_rows = _strong_independent_evidence_rows(db_session, opp.id, n=6)
     refs = [e.id for e in evidence_rows]
@@ -487,7 +536,7 @@ def test_infinite_budget_persists_to_a_real_experiment_row_end_to_end(db_session
     run = dispatch_critic(db_session, opp.id, repo_path="/fake", run_critic_fn=lambda **kw: worker_result)
     assert run.success is True
     experiment = db_session.scalars(select(Experiment).where(Experiment.opportunity_id == opp.id)).one()
-    assert math.isinf(experiment.budget_eur)
+    assert experiment.budget_eur is None
 
 
 # ===========================================================================
@@ -495,13 +544,16 @@ def test_infinite_budget_persists_to_a_real_experiment_row_end_to_end(db_session
 # ===========================================================================
 
 def test_MEDIUM_dimension_rating_not_cross_checked_against_its_own_contradicting_evidence():
-    """Confirmed-vs-prompt-only, matching M3.2's established pattern:
-    _validate_evidence_refs only checks that a cited id EXISTS and belongs
-    to this opportunity -- it never inspects the cited row's own `stance`
-    against the dimension's `rating`. A dimension can be rated POSITIVE
-    with HIGH confidence while its ONLY evidence_ref points at a row whose
-    stance is CONTRADICTS -- nothing technical catches this internal
-    inconsistency; only the prompt asks the model not to do it."""
+    """LEAD FIX (M3.3 REVIEWER MEDIUM finding 9, resolved): inverted --
+    originally proved a dimension rated POSITIVE with HIGH confidence,
+    citing ONLY a CONTRADICTS-stance row, was never downgraded. A new,
+    narrow, deterministic check (_validate_evidence_stance_consistency,
+    called after _validate_evidence_refs) now catches exactly this
+    fully-one-sided case: every valid evidence_ref for the dimension has a
+    stance that directly opposes its rating -> downgraded to UNKNOWN for
+    scoring, with an anomaly logged."""
+    from app.evaluation.run_critic import _validate_evidence_stance_consistency
+
     contradicting = Evidence(
         id=1, opportunity_id=1, claim="c", evidence_type="research_finding", claim_type="FACT",
         source="s", source_url=None, stance="CONTRADICTS", found_at=None,
@@ -513,8 +565,37 @@ def test_MEDIUM_dimension_rating_not_cross_checked_against_its_own_contradicting
     ))).dimensions
     anomalies: list[str] = []
     _validate_evidence_refs(dimensions, valid_ids={1}, anomalies=anomalies)
-    assert dimensions["customer_problem"].confidence == "HIGH"  # not downgraded despite citing CONTRADICTS evidence
-    assert not any("stance" in a or "contradict" in a.lower() for a in anomalies)
+    _validate_evidence_stance_consistency(dimensions, {1: contradicting}, anomalies)
+    assert dimensions["customer_problem"].rating == "UNKNOWN"
+    assert dimensions["customer_problem"].confidence == "UNKNOWN"
+    assert any("stance" in a.lower() for a in anomalies)
+
+
+def test_mixed_supports_and_contradicts_evidence_is_left_alone():
+    """A dimension citing BOTH a supporting and a contradicting row is a
+    real judgment call (weighing partial, conflicting evidence) that
+    _validate_evidence_stance_consistency deliberately does not attempt to
+    automate -- only the unambiguous, fully one-sided case is corrected."""
+    from app.evaluation.run_critic import _validate_evidence_stance_consistency
+
+    supporting = Evidence(
+        id=1, opportunity_id=1, claim="c1", evidence_type="research_finding", claim_type="FACT",
+        source="s1", source_url=None, stance="SUPPORTS", found_at=None,
+        source_reliability="HIGH", confidence=0.8, independently_confirmed=False, duplicate_of_evidence_id=None,
+    )
+    contradicting = Evidence(
+        id=2, opportunity_id=1, claim="c2", evidence_type="research_finding", claim_type="FACT",
+        source="s2", source_url=None, stance="CONTRADICTS", found_at=None,
+        source_reliability="HIGH", confidence=0.8, independently_confirmed=False, duplicate_of_evidence_id=None,
+    )
+    dimensions = parse_critic_payload(json.dumps(_full_payload(
+        dim_rating="POSITIVE", dim_confidence="HIGH", dim_refs=[1, 2],
+    ))).dimensions
+    anomalies: list[str] = []
+    _validate_evidence_refs(dimensions, valid_ids={1, 2}, anomalies=anomalies)
+    _validate_evidence_stance_consistency(dimensions, {1: supporting, 2: contradicting}, anomalies)
+    assert dimensions["customer_problem"].rating == "POSITIVE"  # left alone -- not fully one-sided
+    assert dimensions["customer_problem"].confidence == "HIGH"
 
 
 # ===========================================================================

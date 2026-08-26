@@ -637,6 +637,164 @@ def test_O_reject_thresholds():
     assert rec != "REJECT"
 
 
+# ===========================================================================
+# LEAD fix (M3.3 REVIEWER CRITICAL finding 2): the absolute score floor
+# requires sufficient coverage to fire -- UNKNOWN != 0 at the decision-gate
+# level, not just inside _score_from_dimensions.
+# ===========================================================================
+
+def test_low_score_with_insufficient_coverage_does_not_hit_the_absolute_floor():
+    from app.evaluation.run_critic import RedTeamAssessment, ExperimentProposal, REJECT_SCORE_FLOOR_MIN_COVERAGE
+    rt = RedTeamAssessment(strongest_case_against=[], fatal_risks=[], missing_evidence=[])
+    exp = ExperimentProposal(
+        hypothesis="h", critical_assumption="c", cheapest_test="a fully concrete cheap test plan here",
+        budget_eur=100.0, success_criteria="s", stop_criteria="a fully concrete stop criteria here",
+    )
+    rec, reasons = _determine_recommendation(0.0, 0.10, "HIGH", rt, exp)
+    assert rec != "REJECT"
+    assert rec == "WATCH"
+
+    # Boundary: exactly at the required coverage, the floor DOES fire again.
+    rec, reasons = _determine_recommendation(0.0, REJECT_SCORE_FLOOR_MIN_COVERAGE, "HIGH", rt, exp)
+    assert rec == "REJECT"
+    assert "floor" in reasons[0]
+
+    # Just under the boundary, it does not.
+    rec, _ = _determine_recommendation(0.0, REJECT_SCORE_FLOOR_MIN_COVERAGE - 0.01, "HIGH", rt, exp)
+    assert rec != "REJECT"
+
+
+def test_all_unknown_dossier_falls_through_to_watch_not_reject():
+    from app.evaluation.run_critic import RedTeamAssessment, ExperimentProposal
+    rt = RedTeamAssessment(strongest_case_against=[], fatal_risks=[], missing_evidence=[])
+    exp = ExperimentProposal(
+        hypothesis="h", critical_assumption="c", cheapest_test="a fully concrete cheap test plan here",
+        budget_eur=None, success_criteria="s", stop_criteria="a fully concrete stop criteria here",
+    )
+    rec, reasons = _determine_recommendation(0.0, 0.0, "HIGH", rt, exp)
+    assert rec == "WATCH"
+    assert reasons
+
+
+def test_sufficient_coverage_low_score_still_rejects():
+    """The fix narrows WHEN the floor fires -- it does not remove it. A
+    genuinely low score with genuinely sufficient coverage is still a
+    real, trustworthy REJECT."""
+    from app.evaluation.run_critic import RedTeamAssessment, ExperimentProposal
+    rt = RedTeamAssessment(strongest_case_against=[], fatal_risks=[], missing_evidence=[])
+    exp = ExperimentProposal(
+        hypothesis="h", critical_assumption="c", cheapest_test="a fully concrete cheap test plan here",
+        budget_eur=100.0, success_criteria="s", stop_criteria="a fully concrete stop criteria here",
+    )
+    rec, reasons = _determine_recommendation(5.0, 0.9, "HIGH", rt, exp)
+    assert rec == "REJECT"
+    assert "floor" in reasons[0]
+
+
+# ===========================================================================
+# LEAD fix (M3.3 REVIEWER CRITICAL finding 3): TEST requires the core
+# demand dimensions (customer_problem, buying_intent, customer_pain) to
+# have actually been assessed, not merely enough TOTAL weight elsewhere.
+# ===========================================================================
+
+def _perfect_gate_args():
+    from app.evaluation.run_critic import RedTeamAssessment, ExperimentProposal
+    rt = RedTeamAssessment(strongest_case_against=[], fatal_risks=[], missing_evidence=[])
+    exp = ExperimentProposal(
+        hypothesis="h", critical_assumption="c", cheapest_test="a fully concrete cheap test plan here",
+        budget_eur=100.0, success_criteria="s", stop_criteria="a fully concrete stop criteria here",
+    )
+    return rt, exp
+
+
+def _breakdown_with(unknown_keys=()):
+    return {
+        key: {"included_in_score": key not in unknown_keys}
+        for key in DIMENSION_KEYS
+    }
+
+
+@pytest.mark.parametrize("unknown_key", ["customer_problem", "buying_intent", "customer_pain"])
+def test_core_demand_dimension_unknown_blocks_test(unknown_key):
+    rt, exp = _perfect_gate_args()
+    breakdown = _breakdown_with(unknown_keys=(unknown_key,))
+    rec, reasons = _determine_recommendation(90.0, 0.85, "HIGH", rt, exp, dimension_breakdown=breakdown)
+    assert rec != "TEST"
+    assert any(unknown_key in r for r in reasons)
+
+
+def test_non_core_dimension_unknown_does_not_block_test():
+    """The gate is narrow -- only the three core demand dimensions, not all
+    nine (per the brief's explicit 'do not add 20 per-dimension gates')."""
+    rt, exp = _perfect_gate_args()
+    breakdown = _breakdown_with(unknown_keys=("creative_potential", "brand_expansion"))
+    rec, _ = _determine_recommendation(90.0, 0.70, "HIGH", rt, exp, dimension_breakdown=breakdown)
+    assert rec == "TEST"
+
+
+def test_all_core_dimensions_known_permits_normal_test_evaluation():
+    rt, exp = _perfect_gate_args()
+    breakdown = _breakdown_with(unknown_keys=())
+    rec, reasons = _determine_recommendation(90.0, 1.0, "HIGH", rt, exp, dimension_breakdown=breakdown)
+    assert rec == "TEST"
+
+
+def test_omitted_dimension_breakdown_does_not_block_unit_level_gate_tests():
+    """dimension_breakdown defaults to None for unit-level callers that
+    don't care about this axis (test_L/M/N/O above) -- dispatch_critic
+    always supplies the real breakdown in production."""
+    rt, exp = _perfect_gate_args()
+    rec, _ = _determine_recommendation(90.0, 1.0, "HIGH", rt, exp)  # no dimension_breakdown
+    assert rec == "TEST"
+
+
+# ===========================================================================
+# LEAD fix (M3.3 REVIEWER CRITICAL finding 1): a fatal risk must pass the
+# same concreteness bar as cheapest_test/stop_criteria before it can force
+# REJECT on its own.
+# ===========================================================================
+
+def test_non_concrete_fatal_risk_does_not_force_reject():
+    from app.evaluation.run_critic import RedTeamAssessment, ExperimentProposal
+    rt = RedTeamAssessment(strongest_case_against=[], fatal_risks=["risk"], missing_evidence=[])
+    exp = ExperimentProposal(
+        hypothesis="h", critical_assumption="c", cheapest_test="a fully concrete cheap test plan here",
+        budget_eur=100.0, success_criteria="s", stop_criteria="a fully concrete stop criteria here",
+    )
+    breakdown = _breakdown_with(unknown_keys=())
+    rec, _ = _determine_recommendation(90.0, 1.0, "HIGH", rt, exp, dimension_breakdown=breakdown)
+    assert rec == "TEST"  # the vague "risk" entry does not block it
+
+
+def test_concrete_fatal_risk_still_forces_reject():
+    from app.evaluation.run_critic import RedTeamAssessment, ExperimentProposal
+    rt = RedTeamAssessment(
+        strongest_case_against=[], fatal_risks=["platform ToS explicitly forbids this business model"],
+        missing_evidence=[],
+    )
+    exp = ExperimentProposal(
+        hypothesis="h", critical_assumption="c", cheapest_test="a fully concrete cheap test plan here",
+        budget_eur=100.0, success_criteria="s", stop_criteria="a fully concrete stop criteria here",
+    )
+    rec, reasons = _determine_recommendation(100.0, 1.0, "HIGH", rt, exp)
+    assert rec == "REJECT"
+    assert "fatal" in reasons[0]
+
+
+def test_mixed_concrete_and_non_concrete_fatal_risks_still_rejects_on_the_concrete_one():
+    from app.evaluation.run_critic import RedTeamAssessment, ExperimentProposal
+    rt = RedTeamAssessment(
+        strongest_case_against=[], fatal_risks=["risk", "a specific, evidence-grounded legal blocker"],
+        missing_evidence=[],
+    )
+    exp = ExperimentProposal(
+        hypothesis="h", critical_assumption="c", cheapest_test="a fully concrete cheap test plan here",
+        budget_eur=100.0, success_criteria="s", stop_criteria="a fully concrete stop criteria here",
+    )
+    rec, _ = _determine_recommendation(100.0, 1.0, "HIGH", rt, exp)
+    assert rec == "REJECT"
+
+
 def test_test_strictly_harder_than_watch_thresholds():
     assert True  # documented structurally: TEST requires score>=65 AND coverage>=0.70 AND HIGH
     # confidence AND concrete plan AND no fatal risk -- WATCH requires none of that,
