@@ -1,6 +1,7 @@
 import logging
 
 from app.collectors.hackernews import fetch_recent_signals as fetch_hackernews_signals
+from app.collectors.reddit import fetch_recent_signals as fetch_reddit_signals
 from app.collectors.rss import fetch_recent_signals as fetch_rss_signals
 from app.core.config import settings
 from app.db.session import SessionLocal
@@ -18,6 +19,9 @@ def collect_raw_signals() -> list[dict]:
 
     if settings.rss_enabled:
         raw_signals.extend(fetch_rss_signals())
+
+    if settings.reddit_enabled:
+        raw_signals.extend(fetch_reddit_signals())
 
     return raw_signals
 

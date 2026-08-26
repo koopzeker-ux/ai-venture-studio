@@ -81,8 +81,41 @@ def test_missing_fields_default_gracefully():
         "source_url": "",
         "title": "",
         "content": "",
-        "metadata": {"engagement_score": None, "published_at": None, "is_launch": False},
+        "metadata": {
+            "engagement_score": None,
+            "published_at": None,
+            "is_launch": False,
+            "subreddit": None,
+            "external_id": None,
+        },
     }
+
+
+def test_subreddit_and_external_id_pass_through_when_present():
+    raw = {
+        "source": "reddit",
+        "source_url": "https://example.com/6",
+        "title": "t",
+        "content": "c",
+        "metadata": {"subreddit": "  smallbusiness  ", "external_id": "  t3_abc123  "},
+    }
+    result = normalize_raw_signal(raw)
+    assert result["metadata"]["subreddit"] == "smallbusiness"
+    assert result["metadata"]["external_id"] == "t3_abc123"
+
+
+def test_subreddit_and_external_id_missing_or_invalid_stays_none():
+    for value in [None, "", "   ", 123, [], {}]:
+        raw = {
+            "source": "fictitious_source_alpha",
+            "source_url": "https://example.com/7",
+            "title": "t",
+            "content": "c",
+            "metadata": {"subreddit": value, "external_id": value},
+        }
+        result = normalize_raw_signal(raw)
+        assert result["metadata"]["subreddit"] is None, f"expected None for {value!r}"
+        assert result["metadata"]["external_id"] is None, f"expected None for {value!r}"
 
 
 def test_is_launch_true_values_are_coerced_to_bool_true():

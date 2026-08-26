@@ -38,6 +38,16 @@ PAIN_POINT_PHRASES = [
     "wish there was",
     "does anyone know a tool",
     "so annoying that",
+    # M3.4: broadened for Reddit-shaped customer-pain phrasing (CLAUDE.md
+    # M3.4 task §5) -- kept to the smallest deterministic set that covers
+    # the requested semantics, not one entry per example phrase.
+    "struggling with",
+    "frustrated with",
+    "hate using",
+    "we do this manually",
+    "why is there no",
+    "is there a tool that",
+    "takes hours",
 ]
 
 PURCHASE_INTENT_PHRASES = [
@@ -45,12 +55,29 @@ PURCHASE_INTENT_PHRASES = [
     "take my money",
     "how much does this cost",
     "is there a paid plan",
+    # M3.4 addition (see PAIN_POINT_PHRASES comment above).
+    "looking for a tool",
+    "looking for software",
+    "where can i buy",
+    "need a product that",
+    "willing to pay",
+    "recommend a service for",
 ]
 
 ALTERNATIVE_SEEKING_PHRASES = [
     "looking for an alternative to",
     "is there a better alternative to",
     "recommend an alternative to",
+    # M3.4 addition (see PAIN_POINT_PHRASES comment above). Bare
+    # "alternative(s) to" deliberately added -- very common real Reddit
+    # phrasing ("alternative to notion?") not covered by the anchored
+    # phrases above.
+    "alternative to",
+    "alternatives to",
+    "instead of",
+    "replacement for",
+    "switching from",
+    "looking to replace",
 ]
 
 _PAIN_POINT_PATTERNS = [re.compile(re.escape(phrase), re.IGNORECASE) for phrase in PAIN_POINT_PHRASES]

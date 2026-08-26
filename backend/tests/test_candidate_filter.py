@@ -74,6 +74,58 @@ def test_alternative_seeking_keyword_triggers_match(phrase):
     assert candidates[0]["evidence_type"] == EVIDENCE_TYPE_ALTERNATIVE_SEEKING
 
 
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "we do this manually every single week",
+        "this process just takes hours to finish",
+        "I'm struggling with our current setup",
+        "so frustrated with this workflow",
+        "I hate using this clunky dashboard",
+        "why is there no simple way to do this",
+        "is there a tool that can automate this for me",
+    ],
+)
+def test_m3_4_pain_point_phrase_extension_matches(phrase):
+    candidates = detect_candidates(_signal(content=phrase))
+    assert len(candidates) == 1
+    assert candidates[0]["evidence_type"] == EVIDENCE_TYPE_PAIN_POINT
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "looking for a tool that handles invoicing",
+        "looking for software to manage bookings",
+        "where can I buy something like this",
+        "I need a product that solves onboarding",
+        "willing to pay for a proper solution",
+        "can anyone recommend a service for this",
+    ],
+)
+def test_m3_4_purchase_intent_phrase_extension_matches(phrase):
+    candidates = detect_candidates(_signal(content=phrase))
+    assert len(candidates) == 1
+    assert candidates[0]["evidence_type"] == EVIDENCE_TYPE_PURCHASE_INTENT
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "what's a good alternative to this expensive tool",
+        "any alternatives to this out there",
+        "what do you use instead of this",
+        "looking for a replacement for our current stack",
+        "we are switching from this to something cheaper",
+        "looking to replace this clunky system",
+    ],
+)
+def test_m3_4_alternative_seeking_phrase_extension_matches(phrase):
+    candidates = detect_candidates(_signal(content=phrase))
+    assert len(candidates) == 1
+    assert candidates[0]["evidence_type"] == EVIDENCE_TYPE_ALTERNATIVE_SEEKING
+
+
 def test_engagement_trigger_matches_at_threshold():
     candidates = detect_candidates(_signal(content="ordinary content", engagement_score=50), engagement_threshold=50)
     assert len(candidates) == 1

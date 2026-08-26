@@ -11,6 +11,14 @@ class Settings(BaseSettings):
     hackernews_enabled: bool = True
     rss_enabled: bool = True
 
+    # M3.4: small, explicit, auditable subreddit list -- comma-separated
+    # subreddit names (no "r/" prefix, e.g. "smallbusiness,SaaS"). Empty by
+    # default: LEAD sets this explicitly before enabling live discovery.
+    # Disabled by default so BUILDER's slice ships inert -- LEAD performs
+    # the bounded live dogfood after REVIEWER approval, never BUILDER.
+    reddit_enabled: bool = False
+    reddit_subreddits: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

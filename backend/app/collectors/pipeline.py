@@ -13,6 +13,9 @@ from sqlalchemy.exc import IntegrityError
 from app.models.entities import Evidence, Opportunity, Signal
 from app.services.candidate_filter import (
     DEFAULT_ENGAGEMENT_THRESHOLD,
+    EVIDENCE_TYPE_ALTERNATIVE_SEEKING,
+    EVIDENCE_TYPE_PAIN_POINT,
+    EVIDENCE_TYPE_PURCHASE_INTENT,
     STRONG_EVIDENCE_TYPES,
     compute_pre_rank_score,
     detect_candidates,
@@ -33,6 +36,27 @@ def passes_candidate_gate(evidence_types: set[str]) -> bool:
     trigger fired. product_launch_signal alone never passes this gate — a
     launch is context, not standalone evidence of demand."""
     return bool(evidence_types & STRONG_EVIDENCE_TYPES)
+
+
+# M3.4: commerce-first ranking tier. Explicit commercial-intent evidence
+# (pain/purchase/alternative-seeking) must outrank pure engagement/traction
+# when a run's volume cap forces a choice between candidates — a 3-upvote
+# post with genuine purchase intent should win a slot over a 2,000-point
+# pure-traction news story. Deliberately NOT folded into
+# STRONG_EVIDENCE_TYPES/compute_pre_rank_score in candidate_filter.py:
+# that set still governs promotion (the *gate*), unchanged; this tier only
+# reorders *which gate-passing candidates get created first* once the cap
+# is hit. traction_signal/product_launch_signal are Tier 2 by omission.
+_TIER_1_EVIDENCE_TYPES = {
+    EVIDENCE_TYPE_PAIN_POINT,
+    EVIDENCE_TYPE_PURCHASE_INTENT,
+    EVIDENCE_TYPE_ALTERNATIVE_SEEKING,
+}
+
+
+def _commerce_tier(evidence_types: set[str]) -> int:
+    """1 if any Tier-1 commercial-intent evidence type is present, else 0."""
+    return 1 if evidence_types & _TIER_1_EVIDENCE_TYPES else 0
 
 
 def _slugify(text: str, uniqueness_key: str) -> str:
@@ -134,13 +158,17 @@ def process_raw_signals(
             "normalized": normalized,
             "candidates": candidates,
             "pre_rank_score": pre_rank_score,
+            "commerce_tier": _commerce_tier(candidate_types),
             "source_url": normalized["source_url"] or "",
         })
 
-    # Deterministic ordering: highest pre-rank first, source_url as a stable
-    # tie-breaker. This is commercial triage priority only, never Opportunity
-    # Score / Evidence Confidence.
-    ranked_pool.sort(key=lambda entry: (-entry["pre_rank_score"], entry["source_url"]))
+    # Deterministic ordering: commerce tier first (Tier 1 = genuine
+    # pain/purchase/alternative-seeking evidence always outranks Tier 2 =
+    # traction/launch-only, regardless of engagement magnitude — see
+    # _commerce_tier), then highest pre-rank within a tier, source_url as a
+    # stable final tie-breaker. This is commercial triage priority only,
+    # never Opportunity Score / Evidence Confidence.
+    ranked_pool.sort(key=lambda entry: (-entry["commerce_tier"], -entry["pre_rank_score"], entry["source_url"]))
 
     candidates_created = 0
     candidates_skipped_cap = 0
